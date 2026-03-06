@@ -1,0 +1,4 @@
+ALTER TABLE "Customer"
+  ADD COLUMN IF NOT EXISTS "physicalAddress" TEXT,
+  ADD COLUMN IF NOT EXISTS "intercomInfo" TEXT,
+  ADD COLUMN IF NOT EXISTS "intercomLabel" TEXT;

@@ -1,0 +1,51 @@
+name,companyName,email,phone,taxCode,addressLine,city,customerType,preferredTimeSlot,notes
+Marco Rossi,,marco.rossi.1@demo-clienti.it,+39 300000731,PRVDEMO0001,Via Roma 1 - 20121,Milano (MI),PRIVATO,MATTINA,Citofono: interno 4
+Luca Russo,,luca.russo.2@demo-clienti.it,+39 300001462,PRVDEMO0002,Corso Italia 2 - 10121,Torino (TO),PRIVATO,PRANZO,Contattare reception prima di arrivare
+Giulia Gallo,,giulia.gallo.3@demo-clienti.it,+39 300002193,PRVDEMO0003,Via Dante 3 - 00184,Roma (RM),PRIVATO,POMERIGGIO,Chiamare 15 minuti prima
+Sara Greco,,sara.greco.4@demo-clienti.it,+39 300002924,PRVDEMO0004,Via Mazzini 4 - 40121,Bologna (BO),PRIVATO,SERA,Suonare al campanello principale
+Matteo Barbieri,,matteo.barbieri.5@demo-clienti.it,+39 300003655,PRVDEMO0005,Via Torino 5 - 50122,Firenze (FI),PRIVATO,INDIFFERENTE,Referente in sede fino alle 17:00
+Elena Rossi,,elena.rossi.6@demo-clienti.it,+39 300004386,PRVDEMO0006,Via Roma 6 - 35121,Padova (PD),PRIVATO,MATTINA,
+Davide Russo,,davide.russo.7@demo-clienti.it,+39 300005117,PRVDEMO0007,Corso Italia 7 - 37121,Verona (VR),PRIVATO,PRANZO,Portare scala telescopica
+Francesca Gallo,,francesca.gallo.8@demo-clienti.it,+39 300005848,PRVDEMO0008,Via Dante 8 - 25121,Brescia (BS),PRIVATO,POMERIGGIO,Ingresso da cortile interno
+Andrea Greco,,andrea.greco.9@demo-clienti.it,+39 300006579,PRVDEMO0009,Via Mazzini 9 - 43121,Parma (PR),PRIVATO,SERA,Parcheggio interno disponibile
+Chiara Barbieri,,chiara.barbieri.10@demo-clienti.it,+39 300007310,PRVDEMO0010,Via Torino 10 - 16121,Genova (GE),PRIVATO,INDIFFERENTE,Accesso dal cancello laterale
+Stefano Rossi,,stefano.rossi.11@demo-clienti.it,+39 300008041,PRVDEMO0011,Via Roma 11 - 20121,Milano (MI),PRIVATO,MATTINA,Presente cane in giardino
+Valentina Russo,,valentina.russo.12@demo-clienti.it,+39 300008772,PRVDEMO0012,Corso Italia 12 - 10121,Torino (TO),PRIVATO,PRANZO,Locale tecnico al piano -1
+Alessandro Gallo,,alessandro.gallo.13@demo-clienti.it,+39 300009503,PRVDEMO0013,Via Dante 13 - 00184,Roma (RM),PRIVATO,POMERIGGIO,Nessuna nota particolare
+Marta Greco,,marta.greco.14@demo-clienti.it,+39 300010234,PRVDEMO0014,Via Mazzini 14 - 40121,Bologna (BO),PRIVATO,SERA,Richiede avviso via SMS
+Simone Barbieri,,simone.barbieri.15@demo-clienti.it,+39 300010965,PRVDEMO0015,Via Torino 15 - 50122,Firenze (FI),PRIVATO,INDIFFERENTE,Area ZTL: accesso con targa comunicata
+Marco Rossi,,marco.rossi.16@demo-clienti.it,+39 300011696,PRVDEMO0016,Via Roma 16 - 35121,Padova (PD),PRIVATO,MATTINA,Citofono: interno 4
+Luca Russo,,luca.russo.17@demo-clienti.it,+39 300012427,PRVDEMO0017,Corso Italia 17 - 37121,Verona (VR),PRIVATO,PRANZO,Contattare reception prima di arrivare
+Giulia Gallo,,giulia.gallo.18@demo-clienti.it,+39 300013158,PRVDEMO0018,Via Dante 18 - 25121,Brescia (BS),PRIVATO,POMERIGGIO,Chiamare 15 minuti prima
+Sara Greco,,sara.greco.19@demo-clienti.it,+39 300013889,PRVDEMO0019,Via Mazzini 19 - 43121,Parma (PR),PRIVATO,SERA,Suonare al campanello principale
+Matteo Barbieri,,matteo.barbieri.20@demo-clienti.it,+39 300014620,PRVDEMO0020,Via Torino 20 - 16121,Genova (GE),PRIVATO,INDIFFERENTE,Referente in sede fino alle 17:00
+Elena Rossi,,elena.rossi.21@demo-clienti.it,+39 300015351,PRVDEMO0021,Via Roma 21 - 20121,Milano (MI),PRIVATO,MATTINA,
+Davide Russo,,davide.russo.22@demo-clienti.it,+39 300016082,PRVDEMO0022,Corso Italia 22 - 10121,Torino (TO),PRIVATO,PRANZO,Portare scala telescopica
+Francesca Gallo,,francesca.gallo.23@demo-clienti.it,+39 300016813,PRVDEMO0023,Via Dante 23 - 00184,Roma (RM),PRIVATO,POMERIGGIO,Ingresso da cortile interno
+Andrea Greco,,andrea.greco.24@demo-clienti.it,+39 300017544,PRVDEMO0024,Via Mazzini 24 - 40121,Bologna (BO),PRIVATO,SERA,Parcheggio interno disponibile
+Chiara Barbieri,,chiara.barbieri.25@demo-clienti.it,+39 300018275,PRVDEMO0025,Via Torino 25 - 50122,Firenze (FI),PRIVATO,INDIFFERENTE,Accesso dal cancello laterale
+Stefano Rossi,,stefano.rossi.26@demo-clienti.it,+39 300019006,PRVDEMO0026,Via Roma 26 - 35121,Padova (PD),PRIVATO,MATTINA,Presente cane in giardino
+Valentina Russo,,valentina.russo.27@demo-clienti.it,+39 300019737,PRVDEMO0027,Corso Italia 27 - 37121,Verona (VR),PRIVATO,PRANZO,Locale tecnico al piano -1
+Alessandro Gallo,,alessandro.gallo.28@demo-clienti.it,+39 300020468,PRVDEMO0028,Via Dante 28 - 25121,Brescia (BS),PRIVATO,POMERIGGIO,Nessuna nota particolare
+Marta Greco,,marta.greco.29@demo-clienti.it,+39 300021199,PRVDEMO0029,Via Mazzini 29 - 43121,Parma (PR),PRIVATO,SERA,Richiede avviso via SMS
+Simone Barbieri,,simone.barbieri.30@demo-clienti.it,+39 300021930,PRVDEMO0030,Via Torino 30 - 16121,Genova (GE),PRIVATO,INDIFFERENTE,Area ZTL: accesso con targa comunicata
+Reception Termoidraulica,Termoidraulica Alfa SRL,contatti+1.termoidraulica-alfa-srl@demo-aziende.it,+39 300022661,AZIDEMO0001,Via Garibaldi 10 - 40121,Bologna (BO),AZIENDA,POMERIGGIO,Parcheggio interno disponibile
+Segreteria Studio,Studio Delta SRL,contatti+2.studio-delta-srl@demo-aziende.it,+39 300023392,AZIDEMO0002,Via Dante 11 - 50122,Firenze (FI),AZIENDA,SERA,Chiamare 15 minuti prima
+Amministrazione Condominio,Condominio Le Magnolie,contatti+3.condominio-le-magnolie@demo-aziende.it,+39 300024123,AZIDEMO0003,Piazza Libertà 12 - 35121,Padova (PD),AZIENDA,INDIFFERENTE,Locale tecnico al piano -1
+Capo Reparto Hotel,Hotel Aurora SRL,contatti+4.hotel-aurora-srl@demo-aziende.it,+39 300024854,AZIDEMO0004,Via Roma 13 - 37121,Verona (VR),AZIENDA,MATTINA,Contattare reception
+Responsabile Manutenzione Officine,Officine Zanetti SRL,contatti+5.officine-zanetti-srl@demo-aziende.it,+39 300025585,AZIDEMO0005,Viale Europa 14 - 25121,Brescia (BS),AZIENDA,PRANZO,Area ZTL: accesso con targa comunicata
+Portineria Farmacia,Farmacia Centrale,contatti+6.farmacia-centrale@demo-aziende.it,+39 300026316,AZIDEMO0006,Via Mazzini 15 - 43121,Parma (PR),AZIENDA,POMERIGGIO,Parcheggio interno disponibile
+Reception Logistica,Logistica Nord SRL,contatti+7.logistica-nord-srl@demo-aziende.it,+39 300027047,AZIDEMO0007,Via Milano 16 - 16121,Genova (GE),AZIENDA,SERA,Chiamare 15 minuti prima
+Segreteria Supermercato,Supermercato Due Mari,contatti+8.supermercato-due-mari@demo-aziende.it,+39 300027778,AZIDEMO0008,Corso Italia 17 - 20121,Milano (MI),AZIENDA,INDIFFERENTE,Locale tecnico al piano -1
+Amministrazione Metalmeccanica,Metalmeccanica Beta SRL,contatti+9.metalmeccanica-beta-srl@demo-aziende.it,+39 300028509,AZIDEMO0009,Via Manzoni 18 - 10121,Torino (TO),AZIENDA,MATTINA,Contattare reception
+Capo Reparto Clinica,Clinica San Giorgio,contatti+10.clinica-san-giorgio@demo-aziende.it,+39 300029240,AZIDEMO0010,Via Torino 19 - 00184,Roma (RM),AZIENDA,PRANZO,Area ZTL: accesso con targa comunicata
+Responsabile Manutenzione Centro,Centro Uffici Porta Nuova,contatti+11.centro-uffici-porta-nuova@demo-aziende.it,+39 300029971,AZIDEMO0011,Via Garibaldi 20 - 40121,Bologna (BO),AZIENDA,POMERIGGIO,Parcheggio interno disponibile
+Portineria Ristorante,Ristorante La Pergola,contatti+12.ristorante-la-pergola@demo-aziende.it,+39 300030702,AZIDEMO0012,Via Dante 21 - 50122,Firenze (FI),AZIENDA,SERA,Chiamare 15 minuti prima
+Reception Impresa,Impresa Edile Ferri,contatti+13.impresa-edile-ferri@demo-aziende.it,+39 300031433,AZIDEMO0013,Piazza Libertà 22 - 35121,Padova (PD),AZIENDA,INDIFFERENTE,Locale tecnico al piano -1
+Segreteria Cartiera,Cartiera Veneto SPA,contatti+14.cartiera-veneto-spa@demo-aziende.it,+39 300032164,AZIDEMO0014,Via Roma 23 - 37121,Verona (VR),AZIENDA,MATTINA,Contattare reception
+Amministrazione Tecnoservice,Tecnoservice Emilia SRL,contatti+15.tecnoservice-emilia-srl@demo-aziende.it,+39 300032895,AZIDEMO0015,Viale Europa 24 - 25121,Brescia (BS),AZIENDA,PRANZO,Area ZTL: accesso con targa comunicata
+Capo Reparto Magazzini,Magazzini Tirreno SRL,contatti+16.magazzini-tirreno-srl@demo-aziende.it,+39 300033626,AZIDEMO0016,Via Mazzini 25 - 43121,Parma (PR),AZIENDA,POMERIGGIO,Parcheggio interno disponibile
+Responsabile Manutenzione Condominio,Condominio Parco Blu,contatti+17.condominio-parco-blu@demo-aziende.it,+39 300034357,AZIDEMO0017,Via Milano 26 - 16121,Genova (GE),AZIENDA,SERA,Chiamare 15 minuti prima
+Portineria Lavanderia,Lavanderia Rapida SRL,contatti+18.lavanderia-rapida-srl@demo-aziende.it,+39 300035088,AZIDEMO0018,Corso Italia 27 - 20121,Milano (MI),AZIENDA,INDIFFERENTE,Locale tecnico al piano -1
+Reception Autosalone,Autosalone Prima Scelta,contatti+19.autosalone-prima-scelta@demo-aziende.it,+39 300035819,AZIDEMO0019,Via Manzoni 28 - 10121,Torino (TO),AZIENDA,MATTINA,Contattare reception
+Segreteria Panificio,Panificio Industriale Bianchi,contatti+20.panificio-industriale-bianch@demo-aziende.it,+39 300036550,AZIDEMO0020,Via Torino 29 - 00184,Roma (RM),AZIENDA,PRANZO,Area ZTL: accesso con targa comunicata

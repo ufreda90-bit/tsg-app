@@ -1,0 +1,55 @@
+@import "tailwindcss";
+@import "./styles/tokens.css";
+
+@theme {
+  --font-sans: "Plus Jakarta Sans", "Inter", "sans-serif";
+
+  --color-brand-50: #fef9f3;
+  --color-brand-100: #fdead7;
+  --color-brand-200: #fbd6ac;
+  --color-brand-300: #f8bc77;
+  --color-brand-400: #f6a64b;
+  --color-brand-500: #f4a023;
+  --color-brand-600: #e08b1a;
+  --color-brand-700: #b86e17;
+  --color-brand-800: #915a17;
+  --color-brand-900: #764b15;
+
+  --color-accent-50: #f3f9fb;
+  --color-accent-100: #e3f1f7;
+  --color-accent-200: #c1e0ea;
+  --color-accent-300: #90c7d8;
+  --color-accent-400: #58a5be;
+  --color-accent-500: #04729c;
+  --color-accent-600: #036287;
+  --color-accent-700: #035070;
+  --color-accent-800: #03425e;
+  --color-accent-900: #03384f;
+
+  --color-primary: #0066ff;
+  --color-electric-blue: #0052ff;
+  --color-soft-amber: #fff9f2;
+  --color-soft-sky: #f0f7ff;
+
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+  --radius-full: 9999px;
+}
+
+@layer base {
+  body {
+    @apply antialiased selection:bg-brand-500 selection:text-white font-sans;
+    background-color: var(--bg);
+    color: var(--text);
+  }
+}
+
+@layer utilities {
+  .scrollbars-hidden {
+    scrollbar-width: none; /* Firefox */
+    -ms-overflow-style: none; /* IE and Edge */
+  }
+  .scrollbars-hidden::-webkit-scrollbar {
+    display: none; /* Chrome, Safari and Opera */
+  }
+}
