@@ -51,6 +51,7 @@ async function main() {
   await prisma.user.create({
     data: {
       name: 'Admin',
+      username: 'admin',
       email: 'admin@demo.local',
       passwordHash: adminHash,
       role: 'ADMIN'
@@ -60,6 +61,7 @@ async function main() {
   await prisma.user.create({
     data: {
       name: 'Dispatcher',
+      username: 'dispatcher',
       email: 'dispatcher@demo.local',
       passwordHash: dispatcherHash,
       role: 'DISPATCHER'
@@ -70,10 +72,11 @@ async function main() {
     await prisma.user.create({
       data: {
         name: 'Tecnico 1',
+        username: 'tech1',
         email: 'tech1@demo.local',
         passwordHash: techHash,
         role: 'TECHNICIAN',
-        technicianId: createdTechs[0].id
+        technician: { connect: { id: createdTechs[0].id } }
       }
     });
   }
