@@ -29,6 +29,10 @@ import {
   getPublicSignWorkReportByTokenOrThrow,
   signWorkReportByTokenInTransaction
 } from "./work-report-sign.ts";
+import {
+  getInterventionCompletionEligibility,
+  INTERVENTION_COMPLETION_BLOCKED_ERROR_MESSAGE
+} from "./work-report-completion.ts";
 
 type AuthUser = {
   id: number;
@@ -518,7 +522,41 @@ const workReportUpdateSchema = z.object({
   materials: z.string().trim().max(10000).optional().nullable(),
   customerName: z.string().trim().max(200).optional().nullable(),
   customerEmail: z.string().trim().email().optional().or(z.literal('')).nullable(),
+  actualMinutes: z.union([z.number(), z.string().trim()]).optional().nullable(),
 }).strict();
+
+const MAX_MANUAL_ACTUAL_MINUTES = 10_080;
+
+function normalizeManualActualMinutes(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined;
+
+  let numericValue: number;
+  if (typeof value === "number") {
+    numericValue = value;
+  } else if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      throw { status: 400, message: "actualMinutes non valido" };
+    }
+    numericValue = Number(trimmed);
+  } else {
+    throw { status: 400, message: "actualMinutes non valido" };
+  }
+
+  if (!Number.isFinite(numericValue)) {
+    throw { status: 400, message: "actualMinutes non valido" };
+  }
+
+  const normalized = Math.floor(numericValue);
+  if (normalized < 0) {
+    throw { status: 400, message: "actualMinutes deve essere >= 0" };
+  }
+  if (normalized > MAX_MANUAL_ACTUAL_MINUTES) {
+    throw { status: 400, message: "actualMinutes troppo grande (max " + MAX_MANUAL_ACTUAL_MINUTES + ")" };
+  }
+
+  return normalized;
+}
 
 async function getOrCreateWorkReport(tx: Prisma.TransactionClient, interventionId: number) {
   const existing = await tx.workReport.findUnique({ where: { interventionId } });
@@ -1597,6 +1635,11 @@ async function startServer() {
     try {
       const { from, to, technicianId, status } = req.query;
       const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+      const customerQuery = typeof req.query.customer === "string" ? req.query.customer.trim() : "";
+      const phoneQuery = typeof req.query.phone === "string" ? req.query.phone.trim() : "";
+      const addressQuery = typeof req.query.address === "string" ? req.query.address.trim() : "";
+      const dateFromQuery = typeof req.query.dateFrom === "string" ? req.query.dateFrom.trim() : "";
+      const dateToQuery = typeof req.query.dateTo === "string" ? req.query.dateTo.trim() : "";
       const filterPresetRaw = typeof req.query.filterPreset === "string"
         ? req.query.filterPreset.trim().toUpperCase()
         : "ALL";
@@ -1619,8 +1662,37 @@ async function startServer() {
 
       const where: Prisma.InterventionWhereInput = {};
       const andFilters: Prisma.InterventionWhereInput[] = [];
+      const parseDateBoundary = (raw: string, endOfDay: boolean) => {
+        const normalized = raw.trim();
+        if (!normalized) return null;
+        const parsed = new Date(endOfDay ? `${normalized}T23:59:59.999` : `${normalized}T00:00:00.000`);
+        if (!Number.isFinite(parsed.getTime())) return null;
+        return parsed;
+      };
+      const historicalDateFrom = dateFromQuery ? parseDateBoundary(dateFromQuery, false) : null;
+      const historicalDateTo = dateToQuery ? parseDateBoundary(dateToQuery, true) : null;
+      if (dateFromQuery && !historicalDateFrom) {
+        return res.status(400).json({ ok: false, error: 'Parametro dateFrom non valido (usa YYYY-MM-DD)' });
+      }
+      if (dateToQuery && !historicalDateTo) {
+        return res.status(400).json({ ok: false, error: 'Parametro dateTo non valido (usa YYYY-MM-DD)' });
+      }
+      if (historicalDateFrom && historicalDateTo && historicalDateFrom > historicalDateTo) {
+        return res.status(400).json({ ok: false, error: 'Intervallo date non valido: dateFrom deve essere <= dateTo' });
+      }
 
-      if (technicianId) {
+      if (req.user?.role === Role.TECHNICIAN) {
+        if (!req.user.technicianId) {
+          return res.status(403).json({ ok: false, error: "Non autorizzato" });
+        }
+        if (technicianId && Number(technicianId) !== req.user.technicianId) {
+          return res.status(403).json({ ok: false, error: "Non autorizzato" });
+        }
+        where.OR = [
+          { technicianId: req.user.technicianId },
+          { secondaryTechnicianId: req.user.technicianId }
+        ];
+      } else if (technicianId) {
         where.OR = [
           { technicianId: Number(technicianId) },
           { secondaryTechnicianId: Number(technicianId) }
@@ -1660,7 +1732,8 @@ async function startServer() {
                     { name: { contains: q, mode: "insensitive" } },
                     { companyName: { contains: q, mode: "insensitive" } },
                     { email: { contains: q, mode: "insensitive" } },
-                    { phone: { contains: q, mode: "insensitive" } },
+                    { phone1: { contains: q, mode: "insensitive" } },
+                    { phone2: { contains: q, mode: "insensitive" } },
                     { addressLine: { contains: q, mode: "insensitive" } },
                     { physicalAddress: { contains: q, mode: "insensitive" } },
                     { intercomInfo: { contains: q, mode: "insensitive" } },
@@ -1672,6 +1745,68 @@ async function startServer() {
             }
           ]
         });
+      }
+
+      if (customerQuery) {
+        andFilters.push({
+          OR: [
+            { customerNameSnapshot: { contains: customerQuery, mode: "insensitive" } },
+            {
+              customer: {
+                is: {
+                  OR: [
+                    { name: { contains: customerQuery, mode: "insensitive" } },
+                    { companyName: { contains: customerQuery, mode: "insensitive" } }
+                  ]
+                }
+              }
+            }
+          ]
+        });
+      }
+
+      if (phoneQuery) {
+        andFilters.push({
+          OR: [
+            { customerPhoneSnapshot: { contains: phoneQuery, mode: "insensitive" } },
+            {
+              customer: {
+                is: {
+                  OR: [
+                    { phone1: { contains: phoneQuery, mode: "insensitive" } },
+                    { phone2: { contains: phoneQuery, mode: "insensitive" } }
+                  ]
+                }
+              }
+            }
+          ]
+        });
+      }
+
+      if (addressQuery) {
+        andFilters.push({
+          OR: [
+            { address: { contains: addressQuery, mode: "insensitive" } },
+            { customerAddressSnapshot: { contains: addressQuery, mode: "insensitive" } },
+            {
+              customer: {
+                is: {
+                  OR: [
+                    { addressLine: { contains: addressQuery, mode: "insensitive" } },
+                    { physicalAddress: { contains: addressQuery, mode: "insensitive" } }
+                  ]
+                }
+              }
+            }
+          ]
+        });
+      }
+
+      if (historicalDateFrom || historicalDateTo) {
+        const range: Prisma.DateTimeFilter = {};
+        if (historicalDateFrom) range.gte = historicalDateFrom;
+        if (historicalDateTo) range.lte = historicalDateTo;
+        andFilters.push({ startAt: range });
       }
 
       if (filterPresetRaw === "TO_COMPLETE") {
@@ -1711,7 +1846,8 @@ async function startServer() {
               name: true,
               companyName: true,
               email: true,
-              phone: true,
+              phone1: true,
+              phone2: true,
               customerType: true,
               preferredTimeSlot: true,
               addressLine: true,
@@ -1814,13 +1950,24 @@ async function startServer() {
         });
       }
 
+      const whereClause: Prisma.InterventionWhereInput = {
+        customerId,
+        AND: coarseTokens.map((token) => ({
+          address: { contains: token, mode: "insensitive" }
+        }))
+      };
+      if (req.user?.role === Role.TECHNICIAN) {
+        if (!req.user.technicianId) {
+          return res.status(403).json({ ok: false, error: "Non autorizzato" });
+        }
+        whereClause.OR = [
+          { technicianId: req.user.technicianId },
+          { secondaryTechnicianId: req.user.technicianId }
+        ];
+      }
+
       const rows = await prisma.intervention.findMany({
-        where: {
-          customerId,
-          AND: coarseTokens.map((token) => ({
-            address: { contains: token, mode: "insensitive" }
-          }))
-        },
+        where: whereClause,
         select: {
           id: true,
           title: true,
@@ -1893,6 +2040,9 @@ async function startServer() {
         }
       });
       if (!intervention) return res.status(404).json({ error: "Not found" });
+      if (!userCanAccessIntervention(req.user, intervention)) {
+        return res.status(403).json({ ok: false, error: "Non autorizzato" });
+      }
       res.json(intervention);
     } catch (error) {
       logApiError(req, error);
@@ -1931,7 +2081,8 @@ async function startServer() {
               name: true,
               companyName: true,
               email: true,
-              phone: true,
+              phone1: true,
+              phone2: true,
               customerType: true,
               preferredTimeSlot: true,
               taxCode: true,
@@ -2026,6 +2177,9 @@ async function startServer() {
     try {
       const data = interventionSchema.parse(req.body);
       const { media, ...interventionData } = data;
+      if (interventionData.status === InterventionStatus.COMPLETED) {
+        return res.status(400).json({ error: INTERVENTION_COMPLETION_BLOCKED_ERROR_MESSAGE });
+      }
 
       const intervention = await prisma.intervention.create({
         data: {
@@ -2125,7 +2279,8 @@ async function startServer() {
               name: true,
               companyName: true,
               email: true,
-              phone: true,
+              phone1: true,
+              phone2: true,
               customerType: true,
               preferredTimeSlot: true,
               addressLine: true,
@@ -2249,6 +2404,10 @@ async function startServer() {
         auditLog(req, action, baseEntity, "not_found", { status: 404 });
         return res.status(404).json({ error: "Intervento non trovato" });
       }
+      if (!userCanAccessIntervention(req.user, current)) {
+        auditLog(req, action, baseEntity, "forbidden", { status: 403 });
+        return res.status(403).json({ ok: false, error: "Non autorizzato" });
+      }
 
       // Optimistic Locking Check 
       if (version === undefined) {
@@ -2267,6 +2426,16 @@ async function startServer() {
         if (!allowedNext.includes(nextStatus)) {
           auditLog(req, action, baseEntity, "error", { status: 400 });
           return res.status(400).json({ error: "Transizione stato non valida" });
+        }
+      }
+      if (updateData.status === InterventionStatus.COMPLETED && current.status !== InterventionStatus.COMPLETED) {
+        const completion = await getInterventionCompletionEligibility({
+          tx: prisma,
+          interventionId: id
+        });
+        if (!completion.eligible) {
+          auditLog(req, action, baseEntity, "error", { status: 400 });
+          return res.status(400).json({ error: INTERVENTION_COMPLETION_BLOCKED_ERROR_MESSAGE });
         }
       }
 
@@ -2524,10 +2693,15 @@ async function startServer() {
       const body = req.body || {};
       const { version, ...rawPatch } = body;
       const parsed = workReportUpdateSchema.parse(rawPatch);
+      const { actualMinutes: manualActualMinutesRaw, ...parsedContent } = parsed;
       const data: any = {};
-      Object.entries(parsed).forEach(([key, value]) => {
+      Object.entries(parsedContent).forEach(([key, value]) => {
         if (value !== undefined) data[key] = value;
       });
+      const manualActualMinutes = normalizeManualActualMinutes(manualActualMinutesRaw);
+      if (manualActualMinutes !== undefined) {
+        data.actualMinutes = manualActualMinutes;
+      }
 
       const report = await prisma.$transaction(async (tx) => {
         const currentReport = await getOrCreateWorkReport(tx, interventionId);
@@ -2540,12 +2714,38 @@ async function startServer() {
           }
         }
 
-        return updateWorkReportContentWithOptimisticLock({
+        const updatedReport = await updateWorkReportContentWithOptimisticLock({
           tx,
           interventionId,
           providedVersion: version,
           data: patchData
         });
+
+        const completion = await getInterventionCompletionEligibility({
+          tx,
+          interventionId
+        });
+        if (completion.eligible) {
+          await tx.intervention.updateMany({
+            where: {
+              id: interventionId,
+              status: {
+                notIn: [
+                  InterventionStatus.COMPLETED,
+                  InterventionStatus.FAILED,
+                  InterventionStatus.CANCELLED,
+                  InterventionStatus.NO_SHOW
+                ]
+              }
+            },
+            data: {
+              status: InterventionStatus.COMPLETED,
+              version: { increment: 1 }
+            }
+          });
+        }
+
+        return updatedReport;
       });
       res.json(report);
     } catch (error: any) {
@@ -2629,6 +2829,31 @@ async function startServer() {
           });
           rows.push(row);
         }
+
+        const completion = await getInterventionCompletionEligibility({
+          tx,
+          interventionId: workReport.intervention.id
+        });
+        if (completion.eligible) {
+          await tx.intervention.updateMany({
+            where: {
+              id: workReport.intervention.id,
+              status: {
+                notIn: [
+                  InterventionStatus.COMPLETED,
+                  InterventionStatus.FAILED,
+                  InterventionStatus.CANCELLED,
+                  InterventionStatus.NO_SHOW
+                ]
+              }
+            },
+            data: {
+              status: InterventionStatus.COMPLETED,
+              version: { increment: 1 }
+            }
+          });
+        }
+
         return rows;
       });
 
@@ -2658,10 +2883,13 @@ async function startServer() {
       const report = await prisma.$transaction(async (tx) => {
         const intervention = await tx.intervention.findUnique({
           where: { id: interventionId },
-          select: { id: true, status: true }
+          select: { id: true, status: true, technicianId: true, secondaryTechnicianId: true }
         });
         if (!intervention) {
           throw { status: 404, message: "Intervento non trovato" };
+        }
+        if (!userCanAccessIntervention(req.user, intervention)) {
+          throw { status: 403, message: "Non autorizzato" };
         }
 
         const currentReport = await getOrCreateWorkReport(tx, interventionId);
@@ -2740,9 +2968,10 @@ async function startServer() {
       const report = await prisma.$transaction(async (tx) => {
         const intervention = await tx.intervention.findUnique({
           where: { id: interventionId },
-          select: { id: true }
+          select: { id: true, technicianId: true, secondaryTechnicianId: true }
         });
         if (!intervention) throw { status: 404, message: "Intervento non trovato" };
+        if (!userCanAccessIntervention(req.user, intervention)) throw { status: 403, message: "Non autorizzato" };
         const before = await getOrCreateWorkReport(tx, interventionId);
         const after = await pauseStartWorkReportInTransaction({
           tx,
@@ -2778,9 +3007,10 @@ async function startServer() {
       const report = await prisma.$transaction(async (tx) => {
         const intervention = await tx.intervention.findUnique({
           where: { id: interventionId },
-          select: { id: true }
+          select: { id: true, technicianId: true, secondaryTechnicianId: true }
         });
         if (!intervention) throw { status: 404, message: "Intervento non trovato" };
+        if (!userCanAccessIntervention(req.user, intervention)) throw { status: 403, message: "Non autorizzato" };
         const before = await getOrCreateWorkReport(tx, interventionId);
         const after = await pauseStopWorkReportInTransaction({
           tx,
@@ -2818,9 +3048,10 @@ async function startServer() {
       const report = await prisma.$transaction(async (tx) => {
         const intervention = await tx.intervention.findUnique({
           where: { id: interventionId },
-          select: { id: true }
+          select: { id: true, technicianId: true, secondaryTechnicianId: true }
         });
         if (!intervention) throw { status: 404, message: "Intervento non trovato" };
+        if (!userCanAccessIntervention(req.user, intervention)) throw { status: 403, message: "Non autorizzato" };
         const before = await getOrCreateWorkReport(tx, interventionId);
         const after = await stopWorkReportInTransaction({
           tx,
@@ -2853,6 +3084,17 @@ async function startServer() {
     const action = "workReport.sign.generateLink";
     const baseEntity = { interventionId: Number.isFinite(interventionId) ? interventionId : null };
     try {
+      const intervention = await prisma.intervention.findUnique({
+        where: { id: interventionId },
+        select: { id: true, technicianId: true, secondaryTechnicianId: true }
+      });
+      if (!intervention) {
+        return res.status(404).json({ error: "Intervento non trovato" });
+      }
+      if (!userCanAccessIntervention(req.user, intervention)) {
+        return res.status(403).json({ ok: false, error: "Non autorizzato" });
+      }
+
       const token = uuidv4();
 
       let report = await prisma.workReport.findUnique({ where: { interventionId } });
@@ -3039,7 +3281,13 @@ async function startServer() {
         include: { intervention: { include: { technician: true } } }
       });
 
-      if (!report || !report.customerEmail) {
+      if (!report) {
+        return res.status(400).json({ error: "Email cliente mancante o bolla inesistente" });
+      }
+      if (!userCanAccessIntervention(req.user, report.intervention)) {
+        return res.status(403).json({ ok: false, error: "Non autorizzato" });
+      }
+      if (!report.customerEmail) {
         return res.status(400).json({ error: "Email cliente mancante o bolla inesistente" });
       }
 
@@ -3391,13 +3639,31 @@ async function startServer() {
     return normalized || null;
   };
 
+  const normalizeCustomerPhone = (value: string | null | undefined) => {
+    if (value === undefined) return undefined;
+    if (value === null) return null;
+    const normalized = value.trim();
+    return normalized || null;
+  };
+
+  const buildCustomerPhoneDuplicateOrConditions = (phones: Array<string | null | undefined>): Prisma.CustomerWhereInput[] => {
+    const dedupedPhones = [...new Set(phones.filter((phone): phone is string => Boolean(phone && phone.trim())))];
+    const conditions: Prisma.CustomerWhereInput[] = [];
+    for (const phone of dedupedPhones) {
+      conditions.push({ phone1: phone });
+      conditions.push({ phone2: phone });
+    }
+    return conditions;
+  };
+
   const customerSchema = z.object({
     name: z.string().trim().min(1, "Name is required"),
     companyName: z.string().trim().optional().nullable(),
     customerType: z.enum(["PRIVATO", "AZIENDA"]).optional(),
     preferredTimeSlot: z.enum(["MATTINA", "PRANZO", "POMERIGGIO", "SERA", "INDIFFERENTE"]).optional(),
     email: z.string().trim().email().optional().or(z.literal('')).nullable(),
-    phone: z.string().trim().optional().nullable(),
+    phone1: z.string().trim().optional().nullable(),
+    phone2: z.string().trim().optional().nullable(),
     taxCode: z.string().trim().optional().nullable(),
     vatNumber: z.string().trim().optional().nullable(),
     addressLine: z.string().trim().optional().nullable(),
@@ -3445,7 +3711,8 @@ async function startServer() {
           OR: [
             { name: { contains: search, mode: 'insensitive' } },
             { email: { contains: search, mode: 'insensitive' } },
-            { phone: { contains: search, mode: 'insensitive' } },
+            { phone1: { contains: search, mode: 'insensitive' } },
+            { phone2: { contains: search, mode: 'insensitive' } },
             { companyName: { contains: search, mode: 'insensitive' } },
             { notes: { contains: search, mode: 'insensitive' } },
             { intercomInfo: { contains: search, mode: 'insensitive' } },
@@ -3682,14 +3949,28 @@ async function startServer() {
       const data = customerSchema.parse(req.body);
       const normalizedData = {
         ...data,
+        phone1: normalizeCustomerPhone(data.phone1),
+        phone2: normalizeCustomerPhone(data.phone2),
         taxCode: normalizeTaxCode(data.taxCode),
         vatNumber: normalizeVatNumber(data.vatNumber)
       };
 
-      // Dedup logic: check if existing email or phone
-      const OR_conditions = [];
+      const phoneDuplicateOrConditions = buildCustomerPhoneDuplicateOrConditions([
+        normalizedData.phone1,
+        normalizedData.phone2
+      ]);
+      if (phoneDuplicateOrConditions.length > 0) {
+        const existingPhoneCustomer = await prisma.customer.findFirst({
+          where: { OR: phoneDuplicateOrConditions }
+        });
+        if (existingPhoneCustomer) {
+          return res.status(409).json({ error: 'Cliente già presente', data: existingPhoneCustomer });
+        }
+      }
+
+      // Dedup logic: check if existing email or taxCode
+      const OR_conditions: Prisma.CustomerWhereInput[] = [];
       if (normalizedData.email) OR_conditions.push({ email: normalizedData.email });
-      if (normalizedData.phone) OR_conditions.push({ phone: normalizedData.phone });
       if (normalizedData.taxCode) OR_conditions.push({ taxCode: normalizedData.taxCode });
 
       if (OR_conditions.length > 0) {
@@ -3736,9 +4017,26 @@ async function startServer() {
       const data = customerSchema.partial().parse(req.body);
       const normalizedData = {
         ...data,
+        phone1: normalizeCustomerPhone(data.phone1),
+        phone2: normalizeCustomerPhone(data.phone2),
         taxCode: normalizeTaxCode(data.taxCode),
         vatNumber: normalizeVatNumber(data.vatNumber)
       };
+      const phoneDuplicateOrConditions = buildCustomerPhoneDuplicateOrConditions([
+        normalizedData.phone1,
+        normalizedData.phone2
+      ]);
+      if (phoneDuplicateOrConditions.length > 0) {
+        const existingCustomer = await prisma.customer.findFirst({
+          where: {
+            id: { not: req.params.id },
+            OR: phoneDuplicateOrConditions
+          }
+        });
+        if (existingCustomer) {
+          return res.status(409).json({ error: 'Cliente già presente', data: existingCustomer });
+        }
+      }
       const updated = await prisma.customer.update({
         where: { id: req.params.id },
         data: normalizedData

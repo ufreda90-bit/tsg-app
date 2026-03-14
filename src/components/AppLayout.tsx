@@ -14,6 +14,7 @@ interface AppLayoutProps {
   children: ReactNode;
   searchPlaceholder?: string;
   onSearchChange?: (value: string) => void;
+  hideHeaderSearch?: boolean;
   contentClassName?: string;
   brandTitle?: string;
   brandSubtitle?: string;
@@ -51,6 +52,7 @@ export default function AppLayout({
   children,
   searchPlaceholder = 'Cerca...',
   onSearchChange,
+  hideHeaderSearch = false,
   contentClassName,
   brandTitle = '',
   brandSubtitle = 'Control Panel',
@@ -288,15 +290,17 @@ export default function AppLayout({
               </div>
             ) : null}
             <div className="flex items-center gap-3">
-              <div className="relative w-64 max-w-[44vw]">
-                <Search className="w-4 h-4 text-[var(--muted)] absolute left-3 top-1/2 -translate-y-1/2" />
-                <input
-                  value={searchValue}
-                  onChange={(e) => handleSearchChange(e.target.value)}
-                  className="w-full rounded-md border border-[var(--border)] bg-[var(--surface)] pl-9 pr-3 py-2 text-sm text-[var(--text)] outline-none"
-                  placeholder={searchPlaceholder}
-                />
-              </div>
+              {!hideHeaderSearch ? (
+                <div className="relative w-64 max-w-[44vw]">
+                  <Search className="w-4 h-4 text-[var(--muted)] absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    value={searchValue}
+                    onChange={(e) => handleSearchChange(e.target.value)}
+                    className="w-full rounded-md border border-[var(--border)] bg-[var(--surface)] pl-9 pr-3 py-2 text-sm text-[var(--text)] outline-none"
+                    placeholder={searchPlaceholder}
+                  />
+                </div>
+              ) : null}
               <button
                 type="button"
                 onClick={toggleLightDark}

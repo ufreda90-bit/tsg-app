@@ -356,7 +356,7 @@ export default function CreateInterventionModal(props: Props) {
     // Auto-fill snapshots
     setValue('customerNameSnapshot', c.name);
     setValue('customerEmailSnapshot', c.email || '');
-    setValue('customerPhoneSnapshot', c.phone || '');
+    setValue('customerPhoneSnapshot', c.phone1 || c.phone2 || c.phone || '');
     setValue('customerAddressSnapshot', c.addressLine || '');
     setValue('customerTaxCodeSnapshot', c.taxCode || '');
     setValue('customerVatNumberSnapshot', c.vatNumber || '');
@@ -644,7 +644,7 @@ export default function CreateInterventionModal(props: Props) {
           body: JSON.stringify({
             name: data.customerNameSnapshot,
             email: data.customerEmailSnapshot || undefined,
-            phone: data.customerPhoneSnapshot || undefined,
+            phone1: data.customerPhoneSnapshot || undefined,
             taxCode: customerTaxCodeSnapshot || undefined,
             vatNumber: customerVatNumberSnapshot || undefined,
             addressLine: data.customerAddressSnapshot || data.address || undefined
@@ -1077,7 +1077,7 @@ export default function CreateInterventionModal(props: Props) {
                           </div>
                           <div className="text-xs text-slate-500 flex items-center gap-2">
                             {c.email && <span>{c.email}</span>}
-                            {c.phone && <span>{c.phone}</span>}
+                            {(c.phone1 || c.phone2 || c.phone) && <span>{[c.phone1, c.phone2, c.phone].filter(Boolean).join(' / ')}</span>}
                           </div>
                         </button>
                       ))

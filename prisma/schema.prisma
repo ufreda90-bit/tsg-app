@@ -145,7 +145,8 @@ model Customer {
   preferredTimeSlot PreferredTimeSlot @default(INDIFFERENTE)
   name         String
   email        String?
-  phone        String?
+  phone1       String?
+  phone2       String?
   taxCode      String?       @unique
   vatNumber    String?
   addressLine  String?

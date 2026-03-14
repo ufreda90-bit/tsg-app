@@ -1,10 +1,6 @@
 import { openDB, DBSchema, IDBPDatabase } from 'idb';
 
 export type OutboxAction =
-    | 'START_SESSION'
-    | 'STOP_SESSION'
-    | 'PAUSE_START'
-    | 'PAUSE_STOP'
     | 'CREATE_INTERVENTION'
     | 'UPDATE_INTERVENTION'
     | 'SUBMIT_REPORT'

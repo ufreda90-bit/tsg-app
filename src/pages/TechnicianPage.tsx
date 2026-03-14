@@ -2,8 +2,7 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { Intervention, InterventionDetails, AttachmentRecord } from '../types';
 import { format } from 'date-fns';
-import { it } from 'date-fns/locale';
-import { MapPin, Clock, Video, UploadCloud, Play, Check, X, Paperclip } from 'lucide-react';
+import { MapPin, Clock, Video, UploadCloud, X, Paperclip } from 'lucide-react';
 import { cn } from '../lib/utils';
 import WorkReportModal from '../components/WorkReportModal';
 import { apiFetch } from '../lib/apiFetch';
@@ -20,7 +19,6 @@ export default function TechnicianPage() {
     const [interventions, setInterventions] = useState<Intervention[]>([]);
     const [loading, setLoading] = useState(true);
     const [forcedOpenId, setForcedOpenId] = useState<number | null>(null);
-    const [loadingIds, setLoadingIds] = useState<Record<number, boolean>>({});
     const isFetchingRef = useRef(false);
     const cooldownUntilRef = useRef(0);
     const location = useLocation();
@@ -86,83 +84,6 @@ export default function TechnicianPage() {
         setForcedOpenId(id);
     }, [location.search]);
 
-    const handleStartWork = async (id: number) => {
-        if (loadingIds[id]) return;
-        setLoadingIds(prev => ({ ...prev, [id]: true }));
-        try {
-            const res = await apiFetch(`/api/interventions/${id}/work-report/start`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({})
-            });
-            if (res.status === 429) {
-                cooldownUntilRef.current = Date.now() + 2000;
-                toast.error('Troppe richieste, riprova tra qualche secondo');
-                return;
-            }
-            if (!res.ok) {
-                const err = await res.json().catch(() => null);
-                const message = err?.error || 'Errore';
-                toast.error(message);
-                if (message.toLowerCase().includes('completato') || message.toLowerCase().includes('transizione')) {
-                    await fetchInterventions();
-                }
-                return;
-            }
-            await fetchInterventions();
-        } catch (e) {
-            console.error(e);
-            toast.error('Errore avvio lavoro');
-        } finally {
-            setLoadingIds(prev => {
-                const next = { ...prev };
-                delete next[id];
-                return next;
-            });
-        }
-    };
-
-    const handleStopWork = async (id: number) => {
-        if (loadingIds[id]) return;
-        const current = interventions.find(item => item.id === id);
-        if (current?.status === 'COMPLETED') {
-            await fetchInterventions();
-            return;
-        }
-        setLoadingIds(prev => ({ ...prev, [id]: true }));
-        try {
-            const res = await apiFetch(`/api/interventions/${id}/work-report/stop`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ clientEndTime: new Date().toISOString() })
-            });
-            if (res.status === 429) {
-                cooldownUntilRef.current = Date.now() + 2000;
-                toast.error('Troppe richieste, riprova tra qualche secondo');
-                return;
-            }
-            if (!res.ok) {
-                const err = await res.json().catch(() => null);
-                const message = err?.error || 'Errore';
-                toast.error(message);
-                if (message.toLowerCase().includes('completato') || message.toLowerCase().includes('transizione')) {
-                    await fetchInterventions();
-                }
-                return;
-            }
-            await fetchInterventions();
-        } catch (e) {
-            console.error(e);
-            toast.error('Errore chiusura lavoro');
-        } finally {
-            setLoadingIds(prev => {
-                const next = { ...prev };
-                delete next[id];
-                return next;
-            });
-        }
-    };
-
     if (!technicianId) return <div className="p-4">Accesso non autorizzato</div>;
 
     const today = new Date().toISOString().split('T')[0];
@@ -191,9 +112,7 @@ export default function TechnicianPage() {
                                 <InterventionCard
                                     key={i.id}
                                     intervention={i}
-                                    onStartWork={handleStartWork}
-                                    onStopWork={handleStopWork}
-                                    isLoading={!!loadingIds[i.id]}
+                                    isLoading={false}
                                     onRefresh={fetchInterventions}
                                     forceOpenReportId={forcedOpenId}
                                     onForceOpenHandled={() => setForcedOpenId(null)}
@@ -217,9 +136,7 @@ export default function TechnicianPage() {
                                 <InterventionCard
                                     key={i.id}
                                     intervention={i}
-                                    onStartWork={handleStartWork}
-                                    onStopWork={handleStopWork}
-                                    isLoading={!!loadingIds[i.id]}
+                                    isLoading={false}
                                     onRefresh={fetchInterventions}
                                     forceOpenReportId={forcedOpenId}
                                     onForceOpenHandled={() => setForcedOpenId(null)}
@@ -239,30 +156,23 @@ function CalendarIcon({ className }: { className?: string }) {
 
 function InterventionCard({
     intervention,
-    onStartWork,
-    onStopWork,
     onRefresh,
     isLoading,
     forceOpenReportId,
     onForceOpenHandled
 }: {
     intervention: Intervention,
-    onStartWork: (id: number) => void,
-    onStopWork: (id: number) => void,
     onRefresh: () => void,
     isLoading: boolean,
     forceOpenReportId?: number | null,
     onForceOpenHandled?: () => void
 }) {
     const isDone = intervention.status === 'COMPLETED';
-    const isInProgress = intervention.status === 'IN_PROGRESS';
-    const isScheduled = intervention.status === 'SCHEDULED';
     const allDisabled = isLoading;
     const [uploading, setUploading] = useState(false);
     const [isReportOpen, setIsReportOpen] = useState(false);
     const [isDetailsOpen, setIsDetailsOpen] = useState(false);
     const [mediaList, setMediaList] = useState<any[]>(intervention.media || []);
-    const [elapsedMinutes, setElapsedMinutes] = useState<number | null>(null);
 
     useEffect(() => {
         setMediaList(intervention.media || []);
@@ -300,26 +210,6 @@ function InterventionCard({
             priority: 130
         }
     });
-
-    useEffect(() => {
-        if (!isInProgress) {
-            setElapsedMinutes(null);
-            return;
-        }
-        const startAt = intervention.workReport?.actualStartAt;
-        if (!startAt) {
-            setElapsedMinutes(null);
-            return;
-        }
-        const compute = () => {
-            const diffMs = Date.now() - new Date(startAt).getTime();
-            const mins = Math.max(1, Math.ceil(diffMs / 60000));
-            setElapsedMinutes(mins);
-        };
-        compute();
-        const id = setInterval(compute, 30000);
-        return () => clearInterval(id);
-    }, [isInProgress, intervention.workReport?.actualStartAt]);
 
     const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -364,8 +254,6 @@ function InterventionCard({
     })();
 
     const primaryCta = (() => {
-        if (isScheduled) return { label: 'Avvia', action: () => onStartWork(intervention.id), aria: 'Avvia intervento', icon: Play };
-        if (isInProgress) return { label: 'Chiudi', action: () => onStopWork(intervention.id), aria: 'Chiudi intervento', icon: Check };
         if (isDone) {
             if (!intervention.workReport?.signedAt) return { label: 'Firma bolla', action: () => setIsReportOpen(true), aria: 'Firma bolla' };
             if (WORK_REPORT_EMAIL_ENABLED && !intervention.workReport?.emailedAt) {
@@ -373,12 +261,11 @@ function InterventionCard({
             }
             return { label: 'Visualizza bolla', action: () => setIsReportOpen(true), aria: 'Visualizza bolla' };
         }
-        return { label: 'Apri dettagli', action: () => setIsReportOpen(true), aria: 'Apri dettagli intervento' };
+        return { label: 'Compila bolla', action: () => setIsReportOpen(true), aria: 'Compila bolla' };
     })();
 
     const secondaryCtaLabel = 'Dettagli';
-    const primaryLoadingLabel = isScheduled ? 'Avvio...' : isInProgress ? 'Chiusura...' : '...';
-    const Icon = primaryCta.icon;
+    const primaryLoadingLabel = '...';
 
     return (
         <div className={cn(
@@ -391,18 +278,13 @@ function InterventionCard({
                         className={cn(
                             'badge-pill',
                             getStatusBadgeClasses(intervention.status),
-                            isInProgress && 'animate-pulse'
+                            intervention.status === 'IN_PROGRESS' && 'animate-pulse'
                         )}
                     >
                         {statusLabel}
                     </span>
                     {reportChip && (
                         <span className={cn('badge-pill', reportChip.className)}>{reportChip.label}</span>
-                    )}
-                    {isInProgress && elapsedMinutes !== null && (
-                        <span className="badge-pill bg-white/70 text-slate-700 border-white/70">
-                            ⏱ {elapsedMinutes} min
-                        </span>
                     )}
                 </div>
                 <div className="flex items-center gap-2">
@@ -437,10 +319,7 @@ function InterventionCard({
                     aria-label={primaryCta.aria}
                 >
                     {allDisabled ? primaryLoadingLabel : (
-                        <>
-                            {Icon && <Icon className="w-4 h-4" />}
-                            {primaryCta.label}
-                        </>
+                        primaryCta.label
                     )}
                 </button>
                 <div className="flex items-center justify-between gap-2">
@@ -646,7 +525,7 @@ function TechnicianInterventionDetailsModal({
                         </button>
                         {fallbackIntervention.status === 'SCHEDULED' && (
                             <div className="glass-chip text-xs text-slate-500 border border-white/70 px-3 py-2">
-                                Per avviare usa il pulsante "Avvia" nella card
+                                Compila la bolla direttamente dalla card intervento
                             </div>
                         )}
                     </div>

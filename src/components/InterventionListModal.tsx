@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Intervention } from '../types';
-import { X, Calendar as CalendarIcon, MapPin, Clock, Search } from 'lucide-react';
+import { X, Calendar as CalendarIcon, MapPin, Clock } from 'lucide-react';
 import { format } from 'date-fns';
 import { it } from 'date-fns/locale';
 import { cn } from '../lib/utils';
@@ -16,6 +16,20 @@ type FilterPreset = 'ALL' | 'TO_COMPLETE' | 'TO_BILL';
 type SortBy = 'statusPriority' | 'dateTime' | 'team' | 'address';
 type SortDir = 'asc' | 'desc';
 const PAGE_LIMIT = 200;
+type SearchFilters = {
+  customer: string;
+  phone: string;
+  address: string;
+  dateFrom: string;
+  dateTo: string;
+};
+const EMPTY_SEARCH_FILTERS: SearchFilters = {
+  customer: '',
+  phone: '',
+  address: '',
+  dateFrom: '',
+  dateTo: ''
+};
 
 export default function InterventionListModal({ onClose, getTeamLabel }: InterventionListModalProps) {
   const [interventions, setInterventions] = useState<Intervention[]>([]);
@@ -24,8 +38,8 @@ export default function InterventionListModal({ onClose, getTeamLabel }: Interve
   const [offset, setOffset] = useState(0);
   const [hasMore, setHasMore] = useState(false);
   const [filterPreset, setFilterPreset] = useState<FilterPreset>('ALL');
-  const [search, setSearch] = useState('');
-  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [searchFilters, setSearchFilters] = useState<SearchFilters>(EMPTY_SEARCH_FILTERS);
+  const [debouncedSearchFilters, setDebouncedSearchFilters] = useState<SearchFilters>(EMPTY_SEARCH_FILTERS);
   const [sortBy, setSortBy] = useState<SortBy>('dateTime');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
   const isMountedRef = useRef(true);
@@ -41,10 +55,16 @@ export default function InterventionListModal({ onClose, getTeamLabel }: Interve
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      setDebouncedSearch(search.trim());
+      setDebouncedSearchFilters({
+        customer: searchFilters.customer.trim(),
+        phone: searchFilters.phone.trim(),
+        address: searchFilters.address.trim(),
+        dateFrom: searchFilters.dateFrom.trim(),
+        dateTo: searchFilters.dateTo.trim()
+      });
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [search]);
+  }, [searchFilters]);
 
   useEffect(() => {
     let cancelled = false;
@@ -65,9 +85,11 @@ export default function InterventionListModal({ onClose, getTeamLabel }: Interve
           limit: String(PAGE_LIMIT),
           offset: '0'
         });
-        if (debouncedSearch.length > 0) {
-          params.set('q', debouncedSearch);
-        }
+        if (debouncedSearchFilters.customer) params.set('customer', debouncedSearchFilters.customer);
+        if (debouncedSearchFilters.phone) params.set('phone', debouncedSearchFilters.phone);
+        if (debouncedSearchFilters.address) params.set('address', debouncedSearchFilters.address);
+        if (debouncedSearchFilters.dateFrom) params.set('dateFrom', debouncedSearchFilters.dateFrom);
+        if (debouncedSearchFilters.dateTo) params.set('dateTo', debouncedSearchFilters.dateTo);
         const res = await apiFetch(`/api/interventions?${params.toString()}`, { signal: controller.signal });
         const data = await res.json().catch(() => []);
         if (!cancelled && isMountedRef.current && listVersion === listVersionRef.current) {
@@ -93,7 +115,7 @@ export default function InterventionListModal({ onClose, getTeamLabel }: Interve
       cancelled = true;
       controller.abort();
     };
-  }, [debouncedSearch, filterPreset, sortBy, sortDir]);
+  }, [debouncedSearchFilters, filterPreset, sortBy, sortDir]);
 
   const handleLoadMore = async () => {
     if (loading || loadingMore || !hasMore) return;
@@ -109,9 +131,11 @@ export default function InterventionListModal({ onClose, getTeamLabel }: Interve
         limit: String(PAGE_LIMIT),
         offset: String(offset)
       });
-      if (debouncedSearch.length > 0) {
-        params.set('q', debouncedSearch);
-      }
+      if (debouncedSearchFilters.customer) params.set('customer', debouncedSearchFilters.customer);
+      if (debouncedSearchFilters.phone) params.set('phone', debouncedSearchFilters.phone);
+      if (debouncedSearchFilters.address) params.set('address', debouncedSearchFilters.address);
+      if (debouncedSearchFilters.dateFrom) params.set('dateFrom', debouncedSearchFilters.dateFrom);
+      if (debouncedSearchFilters.dateTo) params.set('dateTo', debouncedSearchFilters.dateTo);
       const res = await apiFetch(`/api/interventions?${params.toString()}`);
       const data = await res.json().catch(() => []);
       if (
@@ -207,16 +231,41 @@ export default function InterventionListModal({ onClose, getTeamLabel }: Interve
               <option value="TO_BILL">Da contabilizzare</option>
             </select>
           </div>
-          <label className="relative block sm:w-96">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+          <div className="grid w-full gap-2 sm:grid-cols-2 lg:grid-cols-5">
             <input
               type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Cerca per cliente, titolo o indirizzo..."
-              className="w-full glass-input rounded-xl pl-9 pr-3 py-2 text-sm text-slate-700 bg-white/70 border border-white/70 outline-none"
+              value={searchFilters.customer}
+              onChange={(e) => setSearchFilters((prev) => ({ ...prev, customer: e.target.value }))}
+              placeholder="Cliente"
+              className="w-full glass-input rounded-xl px-3 py-2 text-sm text-slate-700 bg-white/70 border border-white/70 outline-none"
             />
-          </label>
+            <input
+              type="text"
+              value={searchFilters.phone}
+              onChange={(e) => setSearchFilters((prev) => ({ ...prev, phone: e.target.value }))}
+              placeholder="Telefono"
+              className="w-full glass-input rounded-xl px-3 py-2 text-sm text-slate-700 bg-white/70 border border-white/70 outline-none"
+            />
+            <input
+              type="text"
+              value={searchFilters.address}
+              onChange={(e) => setSearchFilters((prev) => ({ ...prev, address: e.target.value }))}
+              placeholder="Indirizzo"
+              className="w-full glass-input rounded-xl px-3 py-2 text-sm text-slate-700 bg-white/70 border border-white/70 outline-none"
+            />
+            <input
+              type="date"
+              value={searchFilters.dateFrom}
+              onChange={(e) => setSearchFilters((prev) => ({ ...prev, dateFrom: e.target.value }))}
+              className="w-full glass-input rounded-xl px-3 py-2 text-sm text-slate-700 bg-white/70 border border-white/70 outline-none"
+            />
+            <input
+              type="date"
+              value={searchFilters.dateTo}
+              onChange={(e) => setSearchFilters((prev) => ({ ...prev, dateTo: e.target.value }))}
+              className="w-full glass-input rounded-xl px-3 py-2 text-sm text-slate-700 bg-white/70 border border-white/70 outline-none"
+            />
+          </div>
         </div>
 
         <div className="flex-1 overflow-auto p-0 custom-scrollbar">

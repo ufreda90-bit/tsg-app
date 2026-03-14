@@ -3,6 +3,10 @@ import {
   computeStopTimingFromMilliseconds,
   nonNegativeInt
 } from "./work-report-timing.ts";
+import {
+  getInterventionCompletionEligibility,
+  INTERVENTION_COMPLETION_BLOCKED_ERROR_MESSAGE
+} from "./work-report-completion.ts";
 
 const TERMINAL_INTERVENTION_STATUSES = new Set<InterventionStatus>([
   InterventionStatus.COMPLETED,
@@ -44,6 +48,9 @@ export type StopWorkReportTx = {
       where: Record<string, unknown>;
       data: Record<string, unknown>;
     }): Promise<{ count: number }>;
+  };
+  workReportAttachment: {
+    count(args: { where: { workReportId: string } }): Promise<number>;
   };
 };
 
@@ -148,14 +155,27 @@ export async function stopWorkReportInTransaction(params: {
   if (!updated) {
     throw { status: 404, message: "Work report not found" };
   }
+  const shouldSetCompleted = !TERMINAL_INTERVENTION_STATUSES.has(intervention.status);
+
+  if (shouldSetCompleted) {
+    const completion = await getInterventionCompletionEligibility({
+      tx,
+      interventionId,
+      workReportId: updated.id,
+      workPerformed: updated.workPerformed
+    });
+    if (!completion.eligible) {
+      throw { status: 400, message: INTERVENTION_COMPLETION_BLOCKED_ERROR_MESSAGE };
+    }
+  }
 
   await tx.intervention.update({
     where: { id: interventionId },
     data: {
       version: { increment: 1 },
-      ...(TERMINAL_INTERVENTION_STATUSES.has(intervention.status)
-        ? {}
-        : { status: InterventionStatus.COMPLETED })
+      ...(shouldSetCompleted
+        ? { status: InterventionStatus.COMPLETED }
+        : {})
     }
   });
 

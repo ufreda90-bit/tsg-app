@@ -117,8 +117,6 @@ export default function DispatcherPage() {
   const [teamFilterMenuPos, setTeamFilterMenuPos] = useState<{ left: number; top: number; width: number } | null>(null);
   const [statusFilterMenuPos, setStatusFilterMenuPos] = useState<{ left: number; top: number; width: number } | null>(null);
   const [datePickerMenuPos, setDatePickerMenuPos] = useState<{ left: number; top: number; width: number } | null>(null);
-  const [plannerSearch, setPlannerSearch] = useState('');
-  const [debouncedPlannerSearch, setDebouncedPlannerSearch] = useState('');
   const rawSchedulerLicenseKey =
     (import.meta.env as Record<string, string | undefined>).VITE_FULLCALENDAR_LICENSE_KEY?.trim() ?? '';
   const schedulerLicenseKey = rawSchedulerLicenseKey || 'CC-Attribution-NonCommercial-NoDerivatives';
@@ -305,17 +303,11 @@ export default function DispatcherPage() {
     setDataLoadError(null);
     const requestPromise: Promise<void> = (async () => {
       try {
-        const plannerQuery = debouncedPlannerSearch.trim();
-        const queryForApi = plannerQuery.length >= 2 ? plannerQuery : '';
         const calendarParams = new URLSearchParams({
           from: visibleRange.start,
           to: visibleRange.end
         });
         const backlogParams = new URLSearchParams({ backlog: 'true' });
-        if (queryForApi) {
-          calendarParams.set('q', queryForApi);
-          backlogParams.set('q', queryForApi);
-        }
         const [techRes, intRes, backlogRes] = await Promise.all([
           apiFetch('/api/technicians', { signal: controller.signal }),
           apiFetch(`/api/interventions?${calendarParams.toString()}`, { signal: controller.signal }),
@@ -403,21 +395,12 @@ export default function DispatcherPage() {
   };
 
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      setDebouncedPlannerSearch(plannerSearch);
-    }, 250);
-    return () => {
-      window.clearTimeout(timer);
-    };
-  }, [plannerSearch]);
-
-  useEffect(() => {
     if (!visibleRange) return;
     void fetchData(true);
     return () => {
       fetchAbortRef.current?.abort();
     };
-  }, [debouncedPlannerSearch, visibleRange]);
+  }, [visibleRange]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1593,34 +1576,6 @@ export default function DispatcherPage() {
   const getBacklogStatusLabel = (intervention: Intervention) =>
     (!intervention.startAt && !intervention.technicianId ? 'Da pianificare' : getStatusLabel(intervention.status));
 
-  const normalizedPlannerSearch = debouncedPlannerSearch.trim().toLowerCase();
-  const useBackendPlannerSearch = normalizedPlannerSearch.length >= 2;
-  const matchesPlannerSearch = useCallback((intervention: Intervention) => {
-    if (!normalizedPlannerSearch) return true;
-    if (useBackendPlannerSearch) return true;
-    const haystack = [
-      intervention.title,
-      intervention.description,
-      intervention.address,
-      intervention.customer?.name,
-      intervention.customer?.companyName,
-      intervention.customer?.email,
-      intervention.customer?.phone,
-      intervention.customer?.addressLine,
-      intervention.customer?.physicalAddress,
-      intervention.customer?.intercomInfo,
-      intervention.customer?.intercomLabel,
-      intervention.customer?.notes,
-      intervention.customerNameSnapshot,
-      intervention.customerEmailSnapshot,
-      intervention.customerPhoneSnapshot,
-      intervention.customerAddressSnapshot
-    ]
-      .filter(Boolean)
-      .join(' ')
-      .toLowerCase();
-    return haystack.includes(normalizedPlannerSearch);
-  }, [normalizedPlannerSearch, useBackendPlannerSearch]);
   const getTeamAssignmentFromTeamId = (teamId: number | null) => {
     if (!teamId) return { technicianId: null as number | null, secondaryTechnicianId: null as number | null };
     const team = teamMaps.teams.find(t => t.id === teamId);
@@ -1830,7 +1785,6 @@ export default function DispatcherPage() {
   );
 
   const filteredInterventions = useMemo(() => interventions.filter(i => {
-    if (!matchesPlannerSearch(i)) return false;
     if (selectedTeamIds !== 'ALL') {
       const resolvedTeamId = getResolvedPlannerTeamId(i);
       if (!resolvedTeamId || !selectedTeamIds.includes(resolvedTeamId)) return false;
@@ -1843,7 +1797,7 @@ export default function DispatcherPage() {
       if (i.workReport && i.workReport.emailedAt) return false;
     }
     return true;
-  }), [filterStatus, interventions, matchesPlannerSearch, selectedTeamIds]);
+  }), [filterStatus, interventions, selectedTeamIds]);
   const plannerConflictIds = useMemo(() => {
     const grouped = new Map<number, Array<{ id: number; startMs: number; endMs: number }>>();
     for (const intervention of interventions) {
@@ -1876,7 +1830,6 @@ export default function DispatcherPage() {
   }, [interventions, teamMaps]);
 
   const filteredBacklog = useMemo(() => backlog.filter(i => {
-    if (!matchesPlannerSearch(i)) return false;
     if (selectedTeamIds !== 'ALL') {
       const hasAssignedTeam = Boolean(i.technicianId || i.secondaryTechnicianId);
       // Keep unassigned backlog visible to allow quick dispatch from any filtered view.
@@ -1893,13 +1846,12 @@ export default function DispatcherPage() {
       if (i.workReport && i.workReport.emailedAt) return false;
     }
     return true;
-  }), [backlog, filterStatus, matchesPlannerSearch, selectedTeamIds]);
+  }), [backlog, filterStatus, selectedTeamIds]);
   const plannerResultCount = filteredInterventions.length + filteredBacklog.length;
   const hasActivePlannerFilters = Boolean(
-    plannerSearch.trim() || filterStatus !== 'ALL' || selectedTeamIds !== 'ALL'
+    filterStatus !== 'ALL' || selectedTeamIds !== 'ALL'
   );
   const resetPlannerFilters = () => {
-    setPlannerSearch('');
     setFilterStatus('ALL');
     setSelectedTeamIds('ALL');
   };
@@ -1949,8 +1901,7 @@ export default function DispatcherPage() {
   return (
     <AppLayout
       title="Planner"
-      searchPlaceholder="Cerca cliente, indirizzo, telefono, email..."
-      onSearchChange={setPlannerSearch}
+      hideHeaderSearch
       contentClassName="space-y-6"
       headerInlineContent={
         <div className="min-w-0 w-full flex items-center gap-2">
@@ -2303,7 +2254,7 @@ export default function DispatcherPage() {
                     className="motion-premium inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap"
                   >
                     <List className="w-4 h-4" />
-                    Lista Interventi
+                    Cerca
                   </button>
                 </div>
                 <button

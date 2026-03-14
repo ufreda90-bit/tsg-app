@@ -7,7 +7,6 @@ type WorkReportSendStepProps = {
   emailValid: boolean;
   isSigned: boolean;
   actualMinutes: number;
-  isStopped: boolean;
   emailedAt?: string | null;
 };
 
@@ -19,7 +18,6 @@ export default function WorkReportSendStep({
   emailValid,
   isSigned,
   actualMinutes,
-  isStopped,
   emailedAt
 }: WorkReportSendStepProps) {
   return (
@@ -72,10 +70,6 @@ export default function WorkReportSendStep({
           <div className="flex items-center justify-between">
             <span>Totale minuti</span>
             <span className="font-semibold">{actualMinutes}</span>
-          </div>
-          <div className="flex items-center justify-between">
-            <span>Timer terminato</span>
-            <span className="font-semibold">{isStopped ? 'Sì' : 'No'}</span>
           </div>
         </div>
 

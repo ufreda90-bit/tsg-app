@@ -5,6 +5,7 @@ import type { WorkReportDraftValues } from './draftStorage';
 
 export type PatchWorkReportInput = WorkReportDraftValues & {
   version: number;
+  actualMinutes?: number | string | null;
 };
 
 export class WorkReportApiError extends Error {

@@ -1,6 +1,6 @@
-import { ChevronDown, ChevronRight, Clock, Loader2, Mic, Paperclip, Square, UploadCloud } from 'lucide-react';
+import { CheckCircle2, ChevronDown, ChevronRight, Circle, Clock, Loader2, Mic, Paperclip, Square, UploadCloud } from 'lucide-react';
 import type { ChangeEvent, RefObject } from 'react';
-import type { AttachmentRecord, WorkReport } from '../../../types';
+import type { AttachmentRecord } from '../../../types';
 import type { WorkReportDraftValues } from '../draftStorage';
 
 export type AddressHistoryItem = {
@@ -24,11 +24,14 @@ export type AddressHistoryItem = {
 };
 
 type WorkReportFormStepProps = {
-  report: WorkReport | null;
   values: WorkReportDraftValues;
+  manualActualMinutes: string;
   workPerformedRef: RefObject<HTMLTextAreaElement | null>;
   workPerformedLength: number;
+  workReportAttachmentsCount: number;
   onWorkPerformedChange: (value: string) => void;
+  onManualActualMinutesChange: (value: string) => void;
+  onManualActualMinutesBlur: () => void;
   showOptionalDetails: boolean;
   onToggleOptionalDetails: () => void;
   onExtraWorkChange: (value: string) => void;
@@ -56,11 +59,14 @@ type WorkReportFormStepProps = {
 };
 
 export default function WorkReportFormStep({
-  report,
   values,
+  manualActualMinutes,
   workPerformedRef,
   workPerformedLength,
+  workReportAttachmentsCount,
   onWorkPerformedChange,
+  onManualActualMinutesChange,
+  onManualActualMinutesBlur,
   showOptionalDetails,
   onToggleOptionalDetails,
   onExtraWorkChange,
@@ -86,32 +92,37 @@ export default function WorkReportFormStep({
   addressHistoryError,
   addressHistoryItems
 }: WorkReportFormStepProps) {
+  const hasWorkPerformed = workPerformedLength > 0;
+  const hasWorkReportAttachment = workReportAttachmentsCount > 0;
+
   return (
     <div className="space-y-4">
       <section className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
         <div className="mb-3 flex items-center gap-2 text-xs font-semibold text-slate-600">
           <Clock className="h-4 w-4" />
-          Tempi
+          Durata lavoro
         </div>
         <p className="mb-3 text-xs text-slate-500">
-          Il tempo viene stimato automaticamente. Se vuoi puoi correggerlo.
+          Inserisci i minuti effettivi di lavoro. Il valore viene salvato in bolla.
         </p>
-        <div className="grid grid-cols-3 gap-3 text-sm">
+        <div className="grid grid-cols-1 gap-3 text-sm">
           <div>
-            <div className="text-slate-500">Inizio</div>
-            <div className="font-semibold text-slate-900">
-              {report?.actualStartAt ? new Date(report.actualStartAt).toLocaleTimeString() : '--:--'}
-            </div>
-          </div>
-          <div>
-            <div className="text-slate-500">Fine</div>
-            <div className="font-semibold text-slate-900">
-              {report?.actualEndAt ? new Date(report.actualEndAt).toLocaleTimeString() : '--:--'}
-            </div>
-          </div>
-          <div>
-            <div className="text-slate-500">Totale</div>
-            <div className="font-semibold text-brand-600">{report?.actualMinutes || 0} min</div>
+            <label htmlFor="work-report-actual-minutes" className="mb-1 block text-slate-500">
+              Minuti effettivi
+            </label>
+            <input
+              id="work-report-actual-minutes"
+              type="number"
+              min={0}
+              max={10080}
+              step={1}
+              inputMode="numeric"
+              value={manualActualMinutes}
+              onChange={e => onManualActualMinutesChange(e.target.value)}
+              onBlur={onManualActualMinutesBlur}
+              className="w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-brand-600 outline-none focus:ring-2 focus:ring-brand-400/40"
+              placeholder="0"
+            />
           </div>
         </div>
       </section>
@@ -133,6 +144,41 @@ export default function WorkReportFormStep({
           className="w-full rounded-2xl border border-slate-200 bg-white px-3 py-3 text-sm text-slate-900 outline-none placeholder:text-slate-400 focus:ring-2 focus:ring-brand-400/40"
           placeholder="Descrivi in modo chiaro il lavoro eseguito..."
         />
+      </section>
+
+      <section className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+        <h4 className="text-sm font-semibold text-slate-900">Requisiti completamento</h4>
+        <p className="mt-1 text-xs text-slate-500">
+          Per completare l&apos;intervento servono descrizione lavori e almeno 1 allegato bolla.
+        </p>
+        <div className="mt-3 space-y-2 text-xs text-slate-700">
+          <div className="flex items-center justify-between gap-2">
+            <span className="inline-flex items-center gap-2">
+              {hasWorkPerformed ? (
+                <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+              ) : (
+                <Circle className="h-4 w-4 text-slate-400" />
+              )}
+              Lavori svolti compilati
+            </span>
+            <span className={hasWorkPerformed ? 'font-semibold text-emerald-700' : 'font-semibold text-amber-700'}>
+              {hasWorkPerformed ? 'OK' : 'Manca'}
+            </span>
+          </div>
+          <div className="flex items-center justify-between gap-2">
+            <span className="inline-flex items-center gap-2">
+              {hasWorkReportAttachment ? (
+                <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+              ) : (
+                <Circle className="h-4 w-4 text-slate-400" />
+              )}
+              Allegati bolla caricati
+            </span>
+            <span className={hasWorkReportAttachment ? 'font-semibold text-emerald-700' : 'font-semibold text-amber-700'}>
+              {workReportAttachmentsCount} {workReportAttachmentsCount === 1 ? 'allegato' : 'allegati'}
+            </span>
+          </div>
+        </div>
       </section>
 
       <section className="rounded-2xl border border-slate-200 bg-white">

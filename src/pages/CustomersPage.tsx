@@ -119,6 +119,8 @@ export default function CustomersPage() {
                 customer.name,
                 customer.companyName,
                 customer.email,
+                customer.phone1,
+                customer.phone2,
                 customer.phone,
                 customer.addressLine,
                 customer.physicalAddress,
@@ -157,7 +159,7 @@ export default function CustomersPage() {
             customer,
             customerNameSnapshot: customer.name,
             customerEmailSnapshot: customer.email || undefined,
-            customerPhoneSnapshot: customer.phone || undefined,
+            customerPhoneSnapshot: customer.phone1 || customer.phone2 || customer.phone || undefined,
             customerAddressSnapshot: customer.addressLine || siteAddress
         });
         setIsCreateInterventionOpen(true);
@@ -172,7 +174,7 @@ export default function CustomersPage() {
             address: site.address,
             customerNameSnapshot: customer.name,
             customerEmailSnapshot: customer.email || undefined,
-            customerPhoneSnapshot: customer.phone || undefined,
+            customerPhoneSnapshot: customer.phone1 || customer.phone2 || customer.phone || undefined,
             customerAddressSnapshot: customer.addressLine || site.address
         });
         setIsCreateInterventionOpen(true);
@@ -267,6 +269,9 @@ export default function CustomersPage() {
                     ) : filteredCustomers.map((c) => {
                         const displayAddress = c.addressLine || c.physicalAddress || '-';
                         const provinceSigla = getProvinceSigla(c);
+                        const phone1 = c.phone1 || c.phone || '';
+                        const phone2 = c.phone2 || '';
+                        const phoneValues = [phone1, phone2].filter((value, index, values) => Boolean(value) && values.indexOf(value) === index);
                         return (
                             <div
                                 key={c.id}
@@ -293,15 +298,20 @@ export default function CustomersPage() {
 
                                 <div className="min-w-0">
                                     <div className="lg:hidden text-[11px] uppercase tracking-[0.1em] text-slate-500 mb-0.5">Tel:</div>
-                                    {c.phone ? (
-                                        <a
-                                            href={`tel:${sanitizePhoneForTel(c.phone)}`}
-                                            onClick={(e) => e.stopPropagation()}
-                                            className="text-sm text-slate-600 hover:text-emerald-600 underline-offset-2 hover:underline"
-                                            title={c.phone}
-                                        >
-                                            {c.phone}
-                                        </a>
+                                    {phoneValues.length > 0 ? (
+                                        <div className="flex flex-col gap-1">
+                                            {phoneValues.map((phone) => (
+                                                <a
+                                                    key={phone}
+                                                    href={`tel:${sanitizePhoneForTel(phone)}`}
+                                                    onClick={(e) => e.stopPropagation()}
+                                                    className="text-sm text-slate-600 hover:text-emerald-600 underline-offset-2 hover:underline"
+                                                    title={phone}
+                                                >
+                                                    {phone}
+                                                </a>
+                                            ))}
+                                        </div>
                                     ) : (
                                         <span className="text-sm text-slate-400">-</span>
                                     )}
@@ -413,7 +423,8 @@ function CustomerModal({
     const [jobInterventionsLoadingByJob, setJobInterventionsLoadingByJob] = useState<Record<string, boolean>>({});
     const [jobInterventionsErrorByJob, setJobInterventionsErrorByJob] = useState<Record<string, string>>({});
     const [customerTypeValue, setCustomerTypeValue] = useState<'PRIVATO' | 'AZIENDA'>(customer?.customerType || 'PRIVATO');
-    const phoneInputRef = useRef<HTMLInputElement | null>(null);
+    const phone1InputRef = useRef<HTMLInputElement | null>(null);
+    const phone2InputRef = useRef<HTMLInputElement | null>(null);
 
     useEffect(() => {
         setCustomerTypeValue(customer?.customerType || 'PRIVATO');
@@ -653,7 +664,8 @@ function CustomerModal({
             customerType: (fd.get('customerType') as string) || 'PRIVATO',
             preferredTimeSlot: (fd.get('preferredTimeSlot') as string) || 'INDIFFERENTE',
             email: fd.get('email') as string || null,
-            phone: fd.get('phone') as string || null,
+            phone1: fd.get('phone1') as string || null,
+            phone2: fd.get('phone2') as string || null,
             taxCode: fd.get('taxCode') as string || null,
             vatNumber: fd.get('vatNumber') as string || null,
             addressLine: fd.get('addressLine') as string || null,
@@ -735,20 +747,20 @@ function CustomerModal({
                             <input type="email" name="email" defaultValue={customer?.email || ''} className="w-full border border-slate-300 rounded-lg px-3 py-2 outline-none focus:border-brand-500" placeholder="email@example.com" />
                         </div>
                         <div>
-                            <label className="block text-sm font-semibold text-slate-700 mb-1">Telefono</label>
+                            <label className="block text-sm font-semibold text-slate-700 mb-1">Telefono 1</label>
                             <div className="flex items-center gap-2">
                                 <input
-                                    ref={phoneInputRef}
+                                    ref={phone1InputRef}
                                     type="tel"
-                                    name="phone"
-                                    defaultValue={customer?.phone || ''}
+                                    name="phone1"
+                                    defaultValue={customer?.phone1 || customer?.phone || ''}
                                     className="w-full border border-slate-300 rounded-lg px-3 py-2 outline-none focus:border-brand-500"
                                     placeholder="333 1234567"
                                 />
                                 <button
                                     type="button"
                                     onClick={() => {
-                                        void copyPhoneWithToast(phoneInputRef.current?.value || customer?.phone || '');
+                                        void copyPhoneWithToast(phone1InputRef.current?.value || customer?.phone1 || customer?.phone || '');
                                     }}
                                     aria-label="Copia numero"
                                     className="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-slate-500 hover:text-slate-700 hover:border-slate-400 transition"
@@ -758,15 +770,53 @@ function CustomerModal({
                             </div>
                         </div>
                     </div>
-                    {(customer?.email || customer?.phone) && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div>
+                            <label className="block text-sm font-semibold text-slate-700 mb-1">Telefono 2</label>
+                            <div className="flex items-center gap-2">
+                                <input
+                                    ref={phone2InputRef}
+                                    type="tel"
+                                    name="phone2"
+                                    defaultValue={customer?.phone2 || ''}
+                                    className="w-full border border-slate-300 rounded-lg px-3 py-2 outline-none focus:border-brand-500"
+                                    placeholder="333 1234567"
+                                />
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        void copyPhoneWithToast(phone2InputRef.current?.value || customer?.phone2 || '');
+                                    }}
+                                    aria-label="Copia numero"
+                                    className="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-slate-500 hover:text-slate-700 hover:border-slate-400 transition"
+                                >
+                                    <Copy className="w-4 h-4" />
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    {(customer?.email || customer?.phone1 || customer?.phone2 || customer?.phone) && (
                         <div className="flex flex-col gap-1 text-xs text-slate-600 bg-slate-50 border border-slate-100 rounded-lg px-3 py-2">
                             {customer?.email && <a href={`mailto:${customer.email}`} className="hover:text-brand-600 hover:underline">Email: {customer.email}</a>}
-                            {customer?.phone && (
+                            {(customer?.phone1 || customer?.phone) && (
                                 <div className="flex items-center gap-2">
-                                    <a href={`tel:${sanitizePhoneForTel(customer.phone)}`} className="hover:text-emerald-600 hover:underline">Telefono: {customer.phone}</a>
+                                    <a href={`tel:${sanitizePhoneForTel(customer.phone1 || customer.phone || '')}`} className="hover:text-emerald-600 hover:underline">Telefono 1: {customer.phone1 || customer.phone}</a>
                                     <button
                                         type="button"
-                                        onClick={() => { void copyPhoneWithToast(customer.phone); }}
+                                        onClick={() => { void copyPhoneWithToast(customer.phone1 || customer.phone); }}
+                                        aria-label="Copia numero"
+                                        className="inline-flex items-center justify-center rounded border border-slate-300 bg-white px-1.5 py-1 text-slate-500 hover:text-slate-700 transition"
+                                    >
+                                        <Copy className="w-3.5 h-3.5" />
+                                    </button>
+                                </div>
+                            )}
+                            {customer?.phone2 && (
+                                <div className="flex items-center gap-2">
+                                    <a href={`tel:${sanitizePhoneForTel(customer.phone2)}`} className="hover:text-emerald-600 hover:underline">Telefono 2: {customer.phone2}</a>
+                                    <button
+                                        type="button"
+                                        onClick={() => { void copyPhoneWithToast(customer.phone2); }}
                                         aria-label="Copia numero"
                                         className="inline-flex items-center justify-center rounded border border-slate-300 bg-white px-1.5 py-1 text-slate-500 hover:text-slate-700 transition"
                                     >

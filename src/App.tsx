@@ -296,29 +296,20 @@ function AppInner() {
     try {
       let res: Response | null = null;
 
-      if (item.action === 'START_SESSION') {
-        res = await apiFetch(`/api/interventions/${item.payload.interventionId}/work-report/start`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ clientStartTime: item.payload.clientStartTime })
-        });
-      } else if (item.action === 'STOP_SESSION') {
-        res = await apiFetch(`/api/interventions/${item.payload.interventionId}/work-report/stop`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ clientEndTime: item.payload.clientEndTime, notes: item.payload.notes })
-        });
-      } else if (item.action === 'PAUSE_START') {
-        res = await apiFetch(`/api/interventions/${item.payload.interventionId}/work-report/pause-start`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' }
-        });
-      } else if (item.action === 'PAUSE_STOP') {
-        res = await apiFetch(`/api/interventions/${item.payload.interventionId}/work-report/pause-stop`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' }
-        });
-      } else if (item.action === 'SUBMIT_REPORT') {
+      const legacyAction = String(item.action || '');
+      if (
+        legacyAction === 'START_SESSION' ||
+        legacyAction === 'STOP_SESSION' ||
+        legacyAction === 'PAUSE_START' ||
+        legacyAction === 'PAUSE_STOP'
+      ) {
+        if (item.id !== undefined) {
+          await removeOutboxItem(item.id);
+        }
+        return;
+      }
+
+      if (item.action === 'SUBMIT_REPORT') {
         let version = item.payload.version;
         if (!(typeof version === 'number' && Number.isInteger(version))) {
           version = await resolveWorkReportVersionForSync(Number(item.payload.interventionId));

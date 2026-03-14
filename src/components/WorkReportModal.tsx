@@ -24,6 +24,7 @@ interface Props {
 type StepKey = 'form' | 'sign' | 'send';
 const WORK_REPORT_EMAIL_ENABLED = import.meta.env.VITE_WORK_REPORT_EMAIL_ENABLED === 'true';
 const ATTACHMENT_MAX_SIZE_MB = Number(import.meta.env.VITE_ATTACHMENT_MAX_FILE_SIZE_MB || 15);
+const MAX_MANUAL_ACTUAL_MINUTES = 10_080;
 
 function getInterventionStatusLabel(status?: string) {
   if (status === 'SCHEDULED') return 'PIANIFICATO';
@@ -76,6 +77,7 @@ export default function WorkReportModal({ intervention, onClose, onRefresh }: Pr
   const [addressHistoryLoading, setAddressHistoryLoading] = useState(false);
   const [addressHistoryError, setAddressHistoryError] = useState<string | null>(null);
   const [addressHistoryItems, setAddressHistoryItems] = useState<AddressHistoryItem[]>([]);
+  const [manualActualMinutesInput, setManualActualMinutesInput] = useState('0');
   const previousFocusRef = useRef<HTMLElement | null>(null);
   const workPerformedRef = useRef<HTMLTextAreaElement | null>(null);
   const closeConfirmPrimaryRef = useRef<HTMLButtonElement | null>(null);
@@ -137,6 +139,13 @@ export default function WorkReportModal({ intervention, onClose, onRefresh }: Pr
   useEffect(() => {
     refreshReportAttachments();
   }, [refreshReportAttachments]);
+
+  useEffect(() => {
+    const nextMinutes = typeof report?.actualMinutes === 'number' && Number.isFinite(report.actualMinutes)
+      ? report.actualMinutes
+      : 0;
+    setManualActualMinutesInput(String(nextMinutes));
+  }, [report?.actualMinutes, report?.id]);
 
   useEffect(() => {
     addressHistoryLoadedRef.current = false;
@@ -513,7 +522,63 @@ export default function WorkReportModal({ intervention, onClose, onRefresh }: Pr
     }
   };
 
+  const normalizeManualActualMinutesInput = useCallback((input: string) => {
+    const trimmed = input.trim();
+    if (!trimmed) return 0;
+    const parsed = Number(trimmed.replace(',', '.'));
+    if (!Number.isFinite(parsed)) return null;
+    const normalized = Math.round(parsed);
+    if (!Number.isInteger(normalized)) return null;
+    if (normalized < 0 || normalized > MAX_MANUAL_ACTUAL_MINUTES) return null;
+    return normalized;
+  }, []);
+
+  const persistManualActualMinutes = useCallback(async () => {
+    const normalizedMinutes = normalizeManualActualMinutesInput(manualActualMinutesInput);
+    if (normalizedMinutes === null) {
+      toast.error(`Durata non valida. Inserisci un valore tra 0 e ${MAX_MANUAL_ACTUAL_MINUTES} minuti.`);
+      return false;
+    }
+
+    if (manualActualMinutesInput.trim() !== String(normalizedMinutes)) {
+      setManualActualMinutesInput(String(normalizedMinutes));
+    }
+
+    if (!report?.id) return true;
+    if (normalizedMinutes === (report.actualMinutes || 0)) return true;
+
+    const version = report.version;
+    if (!(typeof version === 'number' && Number.isInteger(version))) {
+      toast.error('Versione bolla non disponibile. Aggiorna e riprova.');
+      return false;
+    }
+
+    const res = await apiFetch(`/api/interventions/${intervention.id}/work-report`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        version,
+        actualMinutes: normalizedMinutes
+      })
+    });
+    const payload = await res.json().catch(() => null);
+
+    if (!res.ok) {
+      const apiError = typeof payload?.error === 'string' ? payload.error : '';
+      toast.error(getCommonApiErrorToastMessage(res.status, apiError, 'Errore salvataggio durata'));
+      if (res.status === 409) {
+        await refreshFromServer({ syncValues: false });
+      }
+      return false;
+    }
+
+    await refreshFromServer({ syncValues: false });
+    return true;
+  }, [getCommonApiErrorToastMessage, intervention.id, manualActualMinutesInput, normalizeManualActualMinutesInput, refreshFromServer, report]);
+
   const handleSaveForm = async () => {
+    const minutesOk = await persistManualActualMinutes();
+    if (!minutesOk) return;
     const result = await saveNow();
     if (result.outcome === 'SYNCED') {
       toast.success(result.message || 'Salvataggio completato!');
@@ -616,10 +681,12 @@ export default function WorkReportModal({ intervention, onClose, onRefresh }: Pr
     : null;
   const isSigned = !!report?.signedAt;
   const isEmailed = !!report?.emailedAt;
-  const isStopped = !!report?.actualEndAt;
   const reportNumber = report?.reportNumber ?? intervention.id;
 
   const workPerformedLength = values.workPerformed.trim().length;
+  const normalizedManualActualMinutes = normalizeManualActualMinutesInput(manualActualMinutesInput);
+  const manualActualMinutesForDisplay = normalizedManualActualMinutes ?? (report?.actualMinutes || 0);
+  const workReportAttachmentsCount = reportAttachments.length;
   const emailValid = !!values.customerEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(values.customerEmail);
   const formatAttachmentKb = (size?: number) => `${Math.max(1, Math.round((size || 0) / 1024))} KB`;
   const formatRecordingDuration = (seconds: number) => {
@@ -669,6 +736,8 @@ export default function WorkReportModal({ intervention, onClose, onRefresh }: Pr
     primaryActionInFlightRef.current = true;
     try {
       if (activeStep === 'form') {
+        const minutesOk = await persistManualActualMinutes();
+        if (!minutesOk) return;
         setStepWithDraftFlush('sign');
         return;
       }
@@ -838,7 +907,7 @@ export default function WorkReportModal({ intervention, onClose, onRefresh }: Pr
                   {bubbleStatusLabel}
                 </span>
                 <span className="shrink-0 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-600">
-                  Totale: {report?.actualMinutes || 0} min
+                  Totale: {manualActualMinutesForDisplay} min
                 </span>
               </div>
             </div>
@@ -894,11 +963,14 @@ export default function WorkReportModal({ intervention, onClose, onRefresh }: Pr
 
           {activeStep === 'form' && (
             <WorkReportFormStep
-              report={report}
               values={values}
+              manualActualMinutes={manualActualMinutesInput}
               workPerformedRef={workPerformedRef}
               workPerformedLength={workPerformedLength}
+              workReportAttachmentsCount={workReportAttachmentsCount}
               onWorkPerformedChange={(value) => setField('workPerformed', value)}
+              onManualActualMinutesChange={setManualActualMinutesInput}
+              onManualActualMinutesBlur={() => { void persistManualActualMinutes(); }}
               showOptionalDetails={showOptionalDetails}
               onToggleOptionalDetails={() => setShowOptionalDetails(prev => !prev)}
               onExtraWorkChange={(value) => setField('extraWork', value)}
@@ -950,8 +1022,7 @@ export default function WorkReportModal({ intervention, onClose, onRefresh }: Pr
               onCustomerNameChange={(value) => setField('customerName', value)}
               emailValid={emailValid}
               isSigned={isSigned}
-              actualMinutes={report?.actualMinutes || 0}
-              isStopped={isStopped}
+              actualMinutes={manualActualMinutesForDisplay}
               emailedAt={report?.emailedAt}
             />
           )}
