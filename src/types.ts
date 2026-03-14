@@ -29,6 +29,20 @@ export type Team = {
   updatedAt: string;
 };
 
+export type UserRoleValue = 'ADMIN' | 'DISPATCHER' | 'TECHNICIAN';
+
+export type ManagedUser = {
+  id: number;
+  name: string;
+  username?: string | null;
+  email?: string | null;
+  role: UserRoleValue;
+  isActive: boolean;
+  technicianId?: number | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type InterventionStatus = 'TO_DO' | 'SCHEDULED' | 'IN_PROGRESS' | 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'NO_SHOW';
 export type InterventionPriority = 'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT';
 export type CustomerType = 'PRIVATO' | 'AZIENDA';

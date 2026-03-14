@@ -7,7 +7,7 @@ import nodemailer from "nodemailer";
 import webpush from "web-push";
 import { jsPDF } from "jspdf";
 import { z } from "zod";
-import rateLimit from "express-rate-limit";
+import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import jwt, { JwtPayload } from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import { createHash, randomBytes, randomUUID } from "crypto";
@@ -101,6 +101,16 @@ function truncateText(input: string | null | undefined, maxLength = 300): string
   if (!raw) return "";
   if (raw.length <= maxLength) return raw;
   return `${raw.slice(0, maxLength)}...`;
+}
+
+function normalizeLoginEmail(input: string | null | undefined): string | null {
+  if (input === undefined || input === null) return null;
+  const value = input.trim().toLowerCase();
+  return value || null;
+}
+
+function normalizeUsername(input: string): string {
+  return input.trim().toLowerCase();
 }
 
 type AuditOutcome = "success" | "noop" | "conflict" | "forbidden" | "not_found" | "error";
@@ -348,6 +358,26 @@ const technicianCreateSchema = z.object({
   skills: z.string().trim().max(500).optional().nullable(),
   color: z.string().trim().regex(TEAM_HEX_COLOR_PATTERN).optional(),
   isActive: z.boolean().optional()
+}).strict();
+
+const USERNAME_PATTERN = /^[a-z0-9._-]{3,64}$/;
+
+const userCreateSchema = z.object({
+  username: z.string().trim().min(3).max(64),
+  email: z.string().trim().email().max(320).optional().or(z.literal("")).nullable(),
+  password: z.string().min(8).max(128),
+  role: z.nativeEnum(Role),
+  isActive: z.boolean().optional(),
+  name: z.string().trim().min(1).max(120).optional()
+}).strict();
+
+const userPatchSchema = z.object({
+  username: z.string().trim().min(3).max(64).optional(),
+  email: z.string().trim().email().max(320).optional().or(z.literal("")).nullable(),
+  password: z.string().max(128).optional(),
+  role: z.nativeEnum(Role).optional(),
+  isActive: z.boolean().optional(),
+  name: z.string().trim().min(1).max(120).optional()
 }).strict();
 
 type TeamMemberDto = {
@@ -885,6 +915,7 @@ async function startServer() {
     };
   };
 
+  const allowAdmin = requireRole(Role.ADMIN);
   const allowDispatcher = requireRole(Role.ADMIN, Role.DISPATCHER);
   const allowTech = requireRole(Role.ADMIN, Role.DISPATCHER, Role.TECHNICIAN);
   const attachmentUploadLimiter = rateLimit({
@@ -892,7 +923,7 @@ async function startServer() {
     max: ATTACHMENT_UPLOAD_RATE_LIMIT_MAX,
     standardHeaders: true,
     legacyHeaders: false,
-    keyGenerator: (req) => req.user?.id ? `u:${req.user.id}` : `ip:${req.ip}`,
+    keyGenerator: (req) => req.user?.id ? `u:${req.user.id}` : `ip:${ipKeyGenerator(req.ip || "")}`,
     handler: (_req, res) => {
       res.setHeader("Retry-After", String(Math.ceil(ATTACHMENT_UPLOAD_RATE_LIMIT_WINDOW_MS / 1000)));
       return sendError(res, 429, "Troppe richieste upload. Riprova più tardi.", "RATE_LIMITED");
@@ -1007,15 +1038,29 @@ async function startServer() {
         return res.status(400).json({ ok: false, error: "Credenziali mancanti" });
       }
 
-      const user = await prisma.user.findFirst({
+      const normalizedIdentifier = String(identifier).trim();
+      let user = await prisma.user.findFirst({
         where: {
           isActive: true,
-          OR: [
-            { email: { equals: String(identifier), mode: 'insensitive' } },
-            { phone: String(identifier) }
-          ]
+          email: { equals: normalizedIdentifier, mode: 'insensitive' }
         }
       });
+      if (!user) {
+        user = await prisma.user.findFirst({
+          where: {
+            isActive: true,
+            username: { equals: normalizedIdentifier, mode: 'insensitive' }
+          }
+        });
+      }
+      if (!user) {
+        user = await prisma.user.findFirst({
+          where: {
+            isActive: true,
+            phone: normalizedIdentifier
+          }
+        });
+      }
 
       if (!user) {
         return res.status(401).json({ ok: false, error: "Credenziali non valide" });
@@ -1120,6 +1165,217 @@ async function startServer() {
     } catch (error) {
       console.error(error);
       res.status(500).json({ ok: false, error: "Failed to fetch user" });
+    }
+  });
+
+  const userPublicSelect = {
+    id: true,
+    name: true,
+    username: true,
+    email: true,
+    role: true,
+    isActive: true,
+    technicianId: true,
+    createdAt: true,
+    updatedAt: true
+  } as const;
+
+  const LAST_ADMIN_BLOCK_MESSAGE = "Operazione non consentita: è richiesto almeno un utente ADMIN.";
+  const LAST_ACTIVE_ADMIN_BLOCK_MESSAGE = "Operazione non consentita: è richiesto almeno un utente ADMIN attivo.";
+
+  // --- USERS (ADMIN) ---
+  app.get("/api/users", allowAdmin, async (req, res) => {
+    try {
+      const users = await prisma.user.findMany({
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        select: userPublicSelect
+      });
+      return res.json(users);
+    } catch (error) {
+      logApiError(req, error);
+      return sendError(res, 500, "Errore caricamento utenti", "USERS_FETCH_FAILED");
+    }
+  });
+
+  app.post("/api/users", allowAdmin, async (req, res) => {
+    try {
+      const parsed = userCreateSchema.safeParse(req.body || {});
+      if (!parsed.success) {
+        return sendError(res, 400, "Dati utente non validi", "VALIDATION_ERROR", { details: parsed.error.flatten() });
+      }
+
+      const username = normalizeUsername(parsed.data.username);
+      if (!USERNAME_PATTERN.test(username)) {
+        return sendError(res, 400, "Username non valido", "INVALID_USERNAME");
+      }
+      const email = normalizeLoginEmail(parsed.data.email);
+      const passwordHash = await bcrypt.hash(parsed.data.password, 10);
+
+      const created = await prisma.user.create({
+        data: {
+          name: parsed.data.name?.trim() || username,
+          username,
+          email,
+          passwordHash,
+          role: parsed.data.role,
+          isActive: parsed.data.isActive ?? true
+        },
+        select: userPublicSelect
+      });
+
+      return res.status(201).json(created);
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        const target = Array.isArray(error.meta?.target)
+          ? error.meta.target.map((value) => String(value).toLowerCase())
+          : [];
+        if (target.some((value) => value.includes("username"))) {
+          return sendError(res, 409, "Username già in uso", "USERNAME_ALREADY_EXISTS");
+        }
+        if (target.some((value) => value.includes("email"))) {
+          return sendError(res, 409, "Email già in uso", "EMAIL_ALREADY_EXISTS");
+        }
+      }
+      logApiError(req, error);
+      return sendError(res, 500, "Errore creazione utente", "USER_CREATE_FAILED");
+    }
+  });
+
+  app.patch("/api/users/:id", allowAdmin, async (req, res) => {
+    try {
+      const userId = Number(req.params.id);
+      if (!Number.isInteger(userId) || userId <= 0) {
+        return sendError(res, 400, "ID utente non valido", "INVALID_USER_ID");
+      }
+
+      const parsed = userPatchSchema.safeParse(req.body || {});
+      if (!parsed.success) {
+        return sendError(res, 400, "Dati utente non validi", "VALIDATION_ERROR", { details: parsed.error.flatten() });
+      }
+
+      const existing = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { id: true, role: true, isActive: true }
+      });
+      if (!existing) {
+        return sendError(res, 404, "Utente non trovato", "USER_NOT_FOUND");
+      }
+
+      const nextRole = parsed.data.role ?? existing.role;
+      const nextIsActive = parsed.data.isActive ?? existing.isActive;
+      const isRoleDemotionFromAdmin = existing.role === Role.ADMIN && nextRole !== Role.ADMIN;
+      const isRemovingActiveAdmin =
+        existing.role === Role.ADMIN &&
+        existing.isActive &&
+        (isRoleDemotionFromAdmin || !nextIsActive);
+
+      if (isRoleDemotionFromAdmin) {
+        const adminsCount = await prisma.user.count({ where: { role: Role.ADMIN } });
+        if (adminsCount <= 1) {
+          return sendError(res, 409, LAST_ADMIN_BLOCK_MESSAGE, "LAST_ADMIN_REQUIRED");
+        }
+      }
+      if (isRemovingActiveAdmin) {
+        const activeAdminsCount = await prisma.user.count({
+          where: { role: Role.ADMIN, isActive: true }
+        });
+        if (activeAdminsCount <= 1) {
+          return sendError(res, 409, LAST_ACTIVE_ADMIN_BLOCK_MESSAGE, "LAST_ACTIVE_ADMIN_REQUIRED");
+        }
+      }
+
+      const data: Prisma.UserUpdateInput = {};
+      if (parsed.data.username !== undefined) {
+        const username = normalizeUsername(parsed.data.username);
+        if (!USERNAME_PATTERN.test(username)) {
+          return sendError(res, 400, "Username non valido", "INVALID_USERNAME");
+        }
+        data.username = username;
+      }
+      if (parsed.data.email !== undefined) {
+        data.email = normalizeLoginEmail(parsed.data.email);
+      }
+      if (parsed.data.role !== undefined) {
+        data.role = parsed.data.role;
+      }
+      if (parsed.data.isActive !== undefined) {
+        data.isActive = parsed.data.isActive;
+      }
+      if (parsed.data.name !== undefined) {
+        data.name = parsed.data.name.trim();
+      }
+      if (parsed.data.password !== undefined) {
+        const password = parsed.data.password.trim();
+        if (password) {
+          if (password.length < 8) {
+            return sendError(res, 400, "Password troppo corta (minimo 8 caratteri)", "INVALID_PASSWORD");
+          }
+          data.passwordHash = await bcrypt.hash(password, 10);
+        }
+      }
+      if (Object.keys(data).length === 0) {
+        return sendError(res, 400, "Nessuna modifica da applicare", "NO_UPDATES");
+      }
+
+      const updated = await prisma.user.update({
+        where: { id: userId },
+        data,
+        select: userPublicSelect
+      });
+
+      return res.json(updated);
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        const target = Array.isArray(error.meta?.target)
+          ? error.meta.target.map((value) => String(value).toLowerCase())
+          : [];
+        if (target.some((value) => value.includes("username"))) {
+          return sendError(res, 409, "Username già in uso", "USERNAME_ALREADY_EXISTS");
+        }
+        if (target.some((value) => value.includes("email"))) {
+          return sendError(res, 409, "Email già in uso", "EMAIL_ALREADY_EXISTS");
+        }
+      }
+      logApiError(req, error);
+      return sendError(res, 500, "Errore aggiornamento utente", "USER_UPDATE_FAILED");
+    }
+  });
+
+  app.delete("/api/users/:id", allowAdmin, async (req, res) => {
+    try {
+      const userId = Number(req.params.id);
+      if (!Number.isInteger(userId) || userId <= 0) {
+        return sendError(res, 400, "ID utente non valido", "INVALID_USER_ID");
+      }
+
+      const existing = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { id: true, role: true, isActive: true }
+      });
+      if (!existing) {
+        return sendError(res, 404, "Utente non trovato", "USER_NOT_FOUND");
+      }
+
+      if (existing.role === Role.ADMIN) {
+        const adminsCount = await prisma.user.count({ where: { role: Role.ADMIN } });
+        if (adminsCount <= 1) {
+          return sendError(res, 409, LAST_ADMIN_BLOCK_MESSAGE, "LAST_ADMIN_REQUIRED");
+        }
+        if (existing.isActive) {
+          const activeAdminsCount = await prisma.user.count({
+            where: { role: Role.ADMIN, isActive: true }
+          });
+          if (activeAdminsCount <= 1) {
+            return sendError(res, 409, LAST_ACTIVE_ADMIN_BLOCK_MESSAGE, "LAST_ACTIVE_ADMIN_REQUIRED");
+          }
+        }
+      }
+
+      await prisma.user.delete({ where: { id: userId } });
+      return res.json({ ok: true });
+    } catch (error) {
+      logApiError(req, error);
+      return sendError(res, 500, "Errore eliminazione utente", "USER_DELETE_FAILED");
     }
   });
 
@@ -3609,6 +3865,13 @@ async function startServer() {
 
   // --- Centralized Error Handler ---
   app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const isMalformedUrlError =
+      err instanceof URIError ||
+      (typeof err?.message === "string" && err.message.toLowerCase().includes("uri malformed"));
+    if (isMalformedUrlError) {
+      console.warn(`[API Warn] reqId=${req.requestId || "-"} route=${req.method} ${req.originalUrl} malformed_url`);
+      return sendError(res, 400, "URL non valida", "MALFORMED_URL");
+    }
     // Hide stack trace in production but log it internally
     console.error(`[API Error] reqId=${req.requestId || "-"} route=${req.method} ${req.originalUrl}`, err.stack || err);
     if (err instanceof z.ZodError) {

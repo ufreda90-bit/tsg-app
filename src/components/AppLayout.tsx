@@ -6,7 +6,6 @@ import { cn } from '../lib/utils';
 import { useTheme } from '../lib/useTheme';
 import { useModalRegistration, useModalStackState } from './ModalStackProvider';
 import CommandPalette, { type CommandPaletteItem } from './CommandPalette';
-import companyLogo from '../../data/img/icona-TSG-FB.png';
 
 interface AppLayoutProps {
   title: string;
@@ -159,7 +158,7 @@ export default function AppLayout({
       <div className="px-6 py-6 border-b border-slate-800 flex items-start justify-between gap-3">
         <div className="flex items-center gap-3 min-w-0">
           <img
-            src={companyLogo}
+            src="/icon-192x192.png"
             alt="Logo aziendale TSG"
             className="h-[52px] w-[52px] shrink-0 rounded-md object-contain bg-white/5 p-1 border border-slate-700/80"
           />

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import AppLayout from '../components/AppLayout';
 import {
   DEFAULT_PLANNER_PREFERENCES,
@@ -9,16 +9,26 @@ import {
   type PlannerSlotMinutes
 } from '../lib/plannerPreferences';
 import { cn } from '../lib/utils';
+import { apiFetch, extractErrorMessage } from '../lib/apiFetch';
 import { toast } from '../components/Toast';
 import { useAuth } from '../context/AuthContext';
 import { Save, RotateCcw, LogOut } from 'lucide-react';
 import { useTheme } from '../lib/useTheme';
 import type { ThemeMode } from '../lib/theme';
+import type { ManagedUser, UserRoleValue } from '../types';
 
 type LocalSettings = {
   conflictToasts: boolean;
   urgentToasts: boolean;
   uiDensity: 'comfortable' | 'compact';
+};
+
+type UserFormState = {
+  username: string;
+  email: string;
+  password: string;
+  role: UserRoleValue;
+  isActive: boolean;
 };
 
 const APP_SETTINGS_STORAGE_KEY = 'app.settings.v1';
@@ -27,6 +37,14 @@ const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
   conflictToasts: true,
   urgentToasts: true,
   uiDensity: 'comfortable'
+};
+
+const DEFAULT_USER_FORM: UserFormState = {
+  username: '',
+  email: '',
+  password: '',
+  role: 'DISPATCHER',
+  isActive: true
 };
 
 const THEME_OPTIONS: Array<{
@@ -62,9 +80,15 @@ function saveLocalSettings(next: LocalSettings) {
 export default function SettingsPage() {
   const { user, role, logout } = useAuth();
   const { mode: themeMode, effectiveTheme, setMode: setThemeMode } = useTheme();
+  const isAdmin = role === 'ADMIN';
   const [plannerPrefs, setPlannerPrefs] = useState<PlannerPreferences>(() => loadPlannerPreferences());
   const [localSettings, setLocalSettings] = useState<LocalSettings>(() => loadLocalSettings());
   const [isSaving, setIsSaving] = useState(false);
+  const [users, setUsers] = useState<ManagedUser[]>([]);
+  const [usersLoading, setUsersLoading] = useState(false);
+  const [isSavingUser, setIsSavingUser] = useState(false);
+  const [editingUserId, setEditingUserId] = useState<number | null>(null);
+  const [userForm, setUserForm] = useState<UserFormState>(DEFAULT_USER_FORM);
   const [savedHash, setSavedHash] = useState(() =>
     JSON.stringify({ planner: loadPlannerPreferences(), local: loadLocalSettings() })
   );
@@ -94,6 +118,115 @@ export default function SettingsPage() {
     setPlannerPrefs(DEFAULT_PLANNER_PREFERENCES);
     setLocalSettings(DEFAULT_LOCAL_SETTINGS);
     toast.info('Valori ripristinati ai default');
+  };
+
+  const loadUsers = async () => {
+    if (!isAdmin) return;
+    setUsersLoading(true);
+    try {
+      const res = await apiFetch('/api/users');
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        toast.error(extractErrorMessage(data));
+        return;
+      }
+      setUsers(Array.isArray(data) ? data : []);
+    } catch {
+      toast.error('Errore caricamento utenti');
+    } finally {
+      setUsersLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    void loadUsers();
+  }, [isAdmin]);
+
+  const resetUserForm = () => {
+    setEditingUserId(null);
+    setUserForm(DEFAULT_USER_FORM);
+  };
+
+  const startEditUser = (target: ManagedUser) => {
+    setEditingUserId(target.id);
+    setUserForm({
+      username: target.username || '',
+      email: target.email || '',
+      password: '',
+      role: target.role,
+      isActive: target.isActive
+    });
+  };
+
+  const handleSubmitUser = async () => {
+    if (!isAdmin) return;
+    const username = userForm.username.trim();
+    if (!username) {
+      toast.error('Username obbligatorio');
+      return;
+    }
+    if (!editingUserId && userForm.password.trim().length < 8) {
+      toast.error('Password minima 8 caratteri');
+      return;
+    }
+
+    setIsSavingUser(true);
+    try {
+      const payload: Record<string, unknown> = {
+        username,
+        email: userForm.email.trim() || null,
+        role: userForm.role,
+        isActive: userForm.isActive
+      };
+      if (editingUserId) {
+        if (userForm.password.trim()) {
+          payload.password = userForm.password;
+        }
+      } else {
+        payload.password = userForm.password;
+      }
+
+      const res = await apiFetch(editingUserId ? `/api/users/${editingUserId}` : '/api/users', {
+        method: editingUserId ? 'PATCH' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        toast.error(extractErrorMessage(data));
+        return;
+      }
+      toast.success(editingUserId ? 'Utente aggiornato' : 'Utente creato');
+      resetUserForm();
+      await loadUsers();
+    } catch {
+      toast.error('Errore salvataggio utente');
+    } finally {
+      setIsSavingUser(false);
+    }
+  };
+
+  const handleDeleteUser = async (target: ManagedUser) => {
+    if (!isAdmin) return;
+    if (!window.confirm(`Eliminare l'utente ${target.username || target.name}?`)) {
+      return;
+    }
+    try {
+      const res = await apiFetch(`/api/users/${target.id}`, { method: 'DELETE' });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        toast.error(extractErrorMessage(data));
+        return;
+      }
+      toast.success('Utente eliminato');
+      if (editingUserId === target.id) {
+        resetUserForm();
+      }
+      await loadUsers();
+    } catch {
+      toast.error('Errore eliminazione utente');
+    }
   };
 
   return (
@@ -308,6 +441,144 @@ export default function SettingsPage() {
             </div>
           </article>
         </section>
+
+        {isAdmin && (
+          <section className="glass-card rounded-2xl border border-white/70 p-4 space-y-4">
+            <div className="flex items-center justify-between gap-3">
+              <h4 className="text-base font-semibold text-slate-800">Utenti</h4>
+              <button
+                type="button"
+                onClick={() => void loadUsers()}
+                className="btn-secondary glass-chip text-sm"
+                disabled={usersLoading}
+              >
+                {usersLoading ? 'Aggiornamento...' : 'Ricarica lista'}
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <label className="flex flex-col gap-1.5">
+                <span className="text-xs font-semibold text-slate-600">Username</span>
+                <input
+                  type="text"
+                  value={userForm.username}
+                  onChange={(event) => setUserForm((prev) => ({ ...prev, username: event.target.value }))}
+                  className="glass-input rounded-xl px-3 py-2 text-sm"
+                  placeholder="username"
+                />
+              </label>
+              <label className="flex flex-col gap-1.5">
+                <span className="text-xs font-semibold text-slate-600">Email</span>
+                <input
+                  type="email"
+                  value={userForm.email}
+                  onChange={(event) => setUserForm((prev) => ({ ...prev, email: event.target.value }))}
+                  className="glass-input rounded-xl px-3 py-2 text-sm"
+                  placeholder="utente@azienda.it"
+                />
+              </label>
+              <label className="flex flex-col gap-1.5">
+                <span className="text-xs font-semibold text-slate-600">
+                  Password {editingUserId ? '(lascia vuoto per non cambiarla)' : ''}
+                </span>
+                <input
+                  type="password"
+                  value={userForm.password}
+                  onChange={(event) => setUserForm((prev) => ({ ...prev, password: event.target.value }))}
+                  className="glass-input rounded-xl px-3 py-2 text-sm"
+                  placeholder={editingUserId ? 'Nuova password (opzionale)' : 'Password'}
+                />
+              </label>
+              <label className="flex flex-col gap-1.5">
+                <span className="text-xs font-semibold text-slate-600">Ruolo</span>
+                <select
+                  value={userForm.role}
+                  onChange={(event) => setUserForm((prev) => ({ ...prev, role: event.target.value as UserRoleValue }))}
+                  className="glass-input rounded-xl px-3 py-2 text-sm"
+                >
+                  <option value="ADMIN">ADMIN</option>
+                  <option value="DISPATCHER">DISPATCHER</option>
+                  <option value="TECHNICIAN">TECHNICIAN</option>
+                </select>
+              </label>
+            </div>
+
+            <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                checked={userForm.isActive}
+                onChange={(event) => setUserForm((prev) => ({ ...prev, isActive: event.target.checked }))}
+                className="h-4 w-4 rounded border-white/70 accent-brand-500"
+              />
+              Utente attivo
+            </label>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void handleSubmitUser()}
+                disabled={isSavingUser}
+                className={cn(
+                  'btn-primary text-sm',
+                  isSavingUser ? 'opacity-60 cursor-not-allowed' : ''
+                )}
+              >
+                {isSavingUser ? 'Salvataggio...' : editingUserId ? 'Aggiorna utente' : 'Crea utente'}
+              </button>
+              {editingUserId ? (
+                <button type="button" onClick={resetUserForm} className="btn-secondary glass-chip text-sm">
+                  Annulla modifica
+                </button>
+              ) : null}
+            </div>
+
+            <div className="rounded-xl border border-white/70 bg-white/45 overflow-x-auto">
+              {usersLoading ? (
+                <p className="px-4 py-3 text-sm text-slate-600">Caricamento utenti...</p>
+              ) : users.length === 0 ? (
+                <p className="px-4 py-3 text-sm text-slate-600">Nessun utente trovato.</p>
+              ) : (
+                <table className="min-w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-slate-600 border-b border-white/70">
+                      <th className="px-3 py-2 font-semibold">Username</th>
+                      <th className="px-3 py-2 font-semibold">Email</th>
+                      <th className="px-3 py-2 font-semibold">Ruolo</th>
+                      <th className="px-3 py-2 font-semibold">Stato</th>
+                      <th className="px-3 py-2 font-semibold">Azioni</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {users.map((managedUser) => (
+                      <tr key={managedUser.id} className="border-b border-white/60 last:border-b-0 text-slate-700">
+                        <td className="px-3 py-2">{managedUser.username || '-'}</td>
+                        <td className="px-3 py-2">{managedUser.email || '-'}</td>
+                        <td className="px-3 py-2">{managedUser.role}</td>
+                        <td className="px-3 py-2">{managedUser.isActive ? 'Attivo' : 'Disattivo'}</td>
+                        <td className="px-3 py-2">
+                          <div className="flex items-center gap-2">
+                            <button type="button" onClick={() => startEditUser(managedUser)} className="btn-secondary glass-chip text-xs">
+                              Modifica
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void handleDeleteUser(managedUser)}
+                              className="rounded-lg border border-rose-300/80 bg-rose-50/80 px-2.5 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-100"
+                              disabled={managedUser.id === user?.id}
+                              title={managedUser.id === user?.id ? 'Non puoi eliminare l’utente corrente' : 'Elimina utente'}
+                            >
+                              Elimina
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </section>
+        )}
 
         <section className="glass-card rounded-2xl border border-white/70 p-4 space-y-3">
           <h4 className="text-base font-semibold text-slate-800">Account</h4>

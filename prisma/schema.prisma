@@ -65,6 +65,7 @@ model Technician {
 model User {
   id            Int       @id @default(autoincrement())
   name          String
+  username      String    @unique
   email         String?   @unique
   phone         String?   @unique
   passwordHash  String
