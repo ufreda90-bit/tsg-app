@@ -1,7 +1,8 @@
 import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { BarChart3, Bell, LayoutGrid, Menu, Moon, Search, Settings, Sun, Users, Wrench, X } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { getAccessToken } from '../lib/authStorage';
 import { cn } from '../lib/utils';
 import { useTheme } from '../lib/useTheme';
 import { useModalRegistration, useModalStackState } from './ModalStackProvider';
@@ -34,6 +35,7 @@ const sidebarItems: SidebarItem[] = [
   { key: 'stats', label: 'Statistiche', to: '/stats', icon: BarChart3 },
   { key: 'settings', label: 'Impostazioni', to: '/settings', icon: Settings }
 ];
+const technicianDisabledRoutes = ['/customers', '/teams', '/stats', '/settings'];
 
 function getUserInitials(name?: string) {
   if (!name) return 'U';
@@ -57,18 +59,26 @@ export default function AppLayout({
   brandSubtitle = 'Control Panel',
   headerInlineContent
 }: AppLayoutProps) {
-  const { user, role, logout } = useAuth();
+  const { user, role, activeRole, availableRoles, setSession, logout } = useAuth();
   const { effectiveTheme, toggleLightDark } = useTheme();
   const location = useLocation();
+  const navigate = useNavigate();
   const [searchValue, setSearchValue] = useState('');
   const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
+  const [isSwitchingRole, setIsSwitchingRole] = useState(false);
   const mobileNavRef = useRef<HTMLDivElement | null>(null);
   const mobileNavTriggerRef = useRef<HTMLButtonElement | null>(null);
   const previousFocusedElementRef = useRef<HTMLElement | null>(null);
   const wasMobileNavOpenRef = useRef(false);
   const { hasOpenModalLike } = useModalStackState();
   const initials = useMemo(() => getUserInitials(user?.name), [user?.name]);
+  const switchableRoles = useMemo(
+    () => availableRoles.filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== null),
+    [availableRoles]
+  );
+  const currentRole = activeRole || role || switchableRoles[0] || '';
+  const isTechnician = activeRole === 'TECHNICIAN';
   const isLogoutAvailable = typeof logout === 'function';
   const commandPaletteItems = useMemo<CommandPaletteItem[]>(
     () =>
@@ -92,6 +102,37 @@ export default function AppLayout({
   const handleLogout = () => {
     if (!isLogoutAvailable) return;
     void logout();
+  };
+
+  const handleRoleSwitch = async (nextRole: string) => {
+    if (!nextRole || nextRole === currentRole) return;
+    const accessToken = getAccessToken();
+    if (!accessToken) return;
+
+    setIsSwitchingRole(true);
+    try {
+      const response = await fetch('/api/auth/switch-role', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`
+        },
+        body: JSON.stringify({ activeRole: nextRole })
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok || !data?.ok || !data?.accessToken || !data?.user) {
+        return;
+      }
+      setSession(data.user, data.accessToken);
+      const targetPath = nextRole === 'TECHNICIAN' ? '/technician' : '/dispatcher';
+      if (!location.pathname.startsWith(targetPath)) {
+        navigate(targetPath);
+      }
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setIsSwitchingRole(false);
+    }
   };
 
   useModalRegistration({
@@ -183,6 +224,7 @@ export default function AppLayout({
         {sidebarItems.map(item => {
           const Icon = item.icon;
           const isActive = location.pathname.startsWith(item.to);
+          const disabled = isTechnician && technicianDisabledRoutes.includes(item.to);
           const baseClass =
             'sidebar-item-premium motion-premium w-full flex items-center justify-between gap-3 rounded-md px-3 py-2.5 text-sm border-l-4 border-l-transparent';
           const content = (
@@ -191,6 +233,21 @@ export default function AppLayout({
               <span>{item.label}</span>
             </span>
           );
+
+          if (disabled) {
+            return (
+              <div
+                key={item.key}
+                aria-disabled="true"
+                className={cn(
+                  baseClass,
+                  'opacity-35 cursor-not-allowed pointer-events-none text-slate-400'
+                )}
+              >
+                {content}
+              </div>
+            );
+          }
 
           return (
             <Link
@@ -216,9 +273,28 @@ export default function AppLayout({
           </div>
           <div className="min-w-0">
             <div className="text-sm font-semibold text-white truncate">{user?.name || 'Utente'}</div>
-            <div className="text-xs text-slate-400">{role || 'Ruolo'}</div>
+            <div className="text-xs text-slate-400">{currentRole || 'Ruolo'}</div>
           </div>
         </div>
+        {switchableRoles.length > 1 ? (
+          <div className="mt-3">
+            <div className="text-[11px] uppercase tracking-[0.08em] text-slate-500">Ruolo attivo</div>
+            <select
+              value={currentRole}
+              onChange={(event) => {
+                void handleRoleSwitch(event.target.value);
+              }}
+              disabled={isSwitchingRole}
+              className="mt-1 w-full rounded-md border border-slate-700 bg-[var(--sidebar-item)] px-2.5 py-2 text-sm text-slate-100 outline-none disabled:opacity-70"
+            >
+              {switchableRoles.map((candidateRole) => (
+                <option key={candidateRole} value={candidateRole}>
+                  {candidateRole}
+                </option>
+              ))}
+            </select>
+          </div>
+        ) : null}
         <button
           onClick={handleLogout}
           disabled={!isLogoutAvailable}

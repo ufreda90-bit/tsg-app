@@ -15,7 +15,7 @@ import { useAuth } from '../context/AuthContext';
 import { Save, RotateCcw, LogOut } from 'lucide-react';
 import { useTheme } from '../lib/useTheme';
 import type { ThemeMode } from '../lib/theme';
-import type { ManagedUser, UserRoleValue } from '../types';
+import type { ManagedUser, Technician, UserRoleValue } from '../types';
 
 type LocalSettings = {
   conflictToasts: boolean;
@@ -28,6 +28,7 @@ type UserFormState = {
   email: string;
   password: string;
   role: UserRoleValue;
+  technicianId: number | null;
   isActive: boolean;
 };
 
@@ -44,6 +45,7 @@ const DEFAULT_USER_FORM: UserFormState = {
   email: '',
   password: '',
   role: 'DISPATCHER',
+  technicianId: null,
   isActive: true
 };
 
@@ -78,14 +80,16 @@ function saveLocalSettings(next: LocalSettings) {
 }
 
 export default function SettingsPage() {
-  const { user, role, logout } = useAuth();
+  const { user, role: persistentRole, activeRole, logout } = useAuth();
   const { mode: themeMode, effectiveTheme, setMode: setThemeMode } = useTheme();
-  const isAdmin = role === 'ADMIN';
+  const isAdmin = activeRole === 'ADMIN';
   const [plannerPrefs, setPlannerPrefs] = useState<PlannerPreferences>(() => loadPlannerPreferences());
   const [localSettings, setLocalSettings] = useState<LocalSettings>(() => loadLocalSettings());
   const [isSaving, setIsSaving] = useState(false);
   const [users, setUsers] = useState<ManagedUser[]>([]);
   const [usersLoading, setUsersLoading] = useState(false);
+  const [technicians, setTechnicians] = useState<Technician[]>([]);
+  const [techniciansLoading, setTechniciansLoading] = useState(false);
   const [isSavingUser, setIsSavingUser] = useState(false);
   const [editingUserId, setEditingUserId] = useState<number | null>(null);
   const [userForm, setUserForm] = useState<UserFormState>(DEFAULT_USER_FORM);
@@ -138,9 +142,28 @@ export default function SettingsPage() {
     }
   };
 
+  const loadTechnicians = async () => {
+    if (!isAdmin) return;
+    setTechniciansLoading(true);
+    try {
+      const res = await apiFetch('/api/technicians');
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        toast.error(extractErrorMessage(data));
+        return;
+      }
+      setTechnicians(Array.isArray(data) ? data : []);
+    } catch {
+      toast.error('Errore caricamento tecnici');
+    } finally {
+      setTechniciansLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (!isAdmin) return;
     void loadUsers();
+    void loadTechnicians();
   }, [isAdmin]);
 
   const resetUserForm = () => {
@@ -155,6 +178,7 @@ export default function SettingsPage() {
       email: target.email || '',
       password: '',
       role: target.role,
+      technicianId: target.technicianId ?? null,
       isActive: target.isActive
     });
   };
@@ -170,6 +194,10 @@ export default function SettingsPage() {
       toast.error('Password minima 8 caratteri');
       return;
     }
+    if (userForm.role === 'TECHNICIAN' && !userForm.technicianId) {
+      toast.error('Seleziona un tecnico per il ruolo TECHNICIAN');
+      return;
+    }
 
     setIsSavingUser(true);
     try {
@@ -177,6 +205,7 @@ export default function SettingsPage() {
         username,
         email: userForm.email.trim() || null,
         role: userForm.role,
+        technicianId: userForm.role === 'TECHNICIAN' ? userForm.technicianId : null,
         isActive: userForm.isActive
       };
       if (editingUserId) {
@@ -493,7 +522,16 @@ export default function SettingsPage() {
                 <span className="text-xs font-semibold text-slate-600">Ruolo</span>
                 <select
                   value={userForm.role}
-                  onChange={(event) => setUserForm((prev) => ({ ...prev, role: event.target.value as UserRoleValue }))}
+                  onChange={(event) =>
+                    setUserForm((prev) => {
+                      const nextRole = event.target.value as UserRoleValue;
+                      return {
+                        ...prev,
+                        role: nextRole,
+                        technicianId: nextRole === 'TECHNICIAN' ? prev.technicianId : null
+                      };
+                    })
+                  }
                   className="glass-input rounded-xl px-3 py-2 text-sm"
                 >
                   <option value="ADMIN">ADMIN</option>
@@ -501,6 +539,29 @@ export default function SettingsPage() {
                   <option value="TECHNICIAN">TECHNICIAN</option>
                 </select>
               </label>
+              {userForm.role === 'TECHNICIAN' ? (
+                <label className="flex flex-col gap-1.5 md:col-span-2">
+                  <span className="text-xs font-semibold text-slate-600">Tecnico collegato</span>
+                  <select
+                    value={userForm.technicianId ?? ''}
+                    onChange={(event) =>
+                      setUserForm((prev) => ({
+                        ...prev,
+                        technicianId: event.target.value ? Number(event.target.value) : null
+                      }))
+                    }
+                    className="glass-input rounded-xl px-3 py-2 text-sm"
+                    disabled={techniciansLoading}
+                  >
+                    <option value="">Seleziona tecnico</option>
+                    {technicians.map((technician) => (
+                      <option key={technician.id} value={technician.id}>
+                        {technician.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
             </div>
 
             <label className="inline-flex items-center gap-2 text-sm text-slate-700">
@@ -584,7 +645,7 @@ export default function SettingsPage() {
           <h4 className="text-base font-semibold text-slate-800">Account</h4>
           <div className="rounded-xl border border-white/70 bg-white/45 px-3 py-3 text-sm text-slate-700 space-y-1">
             <p><span className="font-semibold">Utente:</span> {user?.name || 'N/D'}</p>
-            <p><span className="font-semibold">Ruolo:</span> {role || 'N/D'}</p>
+            <p><span className="font-semibold">Ruolo:</span> {persistentRole || 'N/D'}</p>
           </div>
           <button type="button" onClick={() => void logout()} className="btn-secondary glass-chip text-sm">
             <LogOut className="w-4 h-4" />

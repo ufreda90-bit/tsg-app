@@ -39,6 +39,8 @@ import {
 type AuthUser = {
   id: number;
   role: Role;
+  activeRole: Role;
+  availableRoles: Role[];
   technicianId: number | null;
   organizationId: number | null;
 };
@@ -115,6 +117,16 @@ function normalizeLoginEmail(input: string | null | undefined): string | null {
 
 function normalizeUsername(input: string): string {
   return input.trim().toLowerCase();
+}
+
+function buildAvailableRoles(primaryRole: Role, assignedRoles?: Role[] | null): Role[] {
+  const roles = new Set<Role>([primaryRole]);
+  for (const role of assignedRoles || []) {
+    if (Object.values(Role).includes(role)) {
+      roles.add(role);
+    }
+  }
+  return [...roles];
 }
 
 type AuditOutcome = "success" | "noop" | "conflict" | "forbidden" | "not_found" | "error" | "failed" | "blocked";
@@ -293,14 +305,23 @@ function toAttachmentDto<T extends { id: string; kind: string; mimeType: string;
   };
 }
 
+function getEffectiveRole(user: AuthUser | undefined): Role | null {
+  if (!user) return null;
+  if (user.activeRole && Object.values(Role).includes(user.activeRole)) {
+    return user.activeRole;
+  }
+  return user.role;
+}
+
 function userCanAccessIntervention(
   user: AuthUser | undefined,
   intervention: { organizationId: number; technicianId: number | null; secondaryTechnicianId: number | null }
 ) {
   if (!user) return false;
   if (!user.organizationId || intervention.organizationId !== user.organizationId) return false;
-  if (user.role === Role.ADMIN || user.role === Role.DISPATCHER) return true;
-  if (user.role !== Role.TECHNICIAN || !user.technicianId) return false;
+  const effectiveRole = getEffectiveRole(user);
+  if (effectiveRole === Role.ADMIN || effectiveRole === Role.DISPATCHER) return true;
+  if (effectiveRole !== Role.TECHNICIAN || !user.technicianId) return false;
   return intervention.technicianId === user.technicianId || intervention.secondaryTechnicianId === user.technicianId;
 }
 
@@ -404,6 +425,7 @@ const userCreateSchema = z.object({
   email: z.string().trim().email().max(320).optional().or(z.literal("")).nullable(),
   password: z.string().min(8).max(128),
   role: z.nativeEnum(Role),
+  technicianId: z.number().int().positive().nullable().optional(),
   isActive: z.boolean().optional(),
   name: z.string().trim().min(1).max(120).optional()
 }).strict();
@@ -413,6 +435,7 @@ const userPatchSchema = z.object({
   email: z.string().trim().email().max(320).optional().or(z.literal("")).nullable(),
   password: z.string().max(128).optional(),
   role: z.nativeEnum(Role).optional(),
+  technicianId: z.number().int().positive().nullable().optional(),
   isActive: z.boolean().optional(),
   name: z.string().trim().min(1).max(120).optional()
 }).strict();
@@ -1006,9 +1029,19 @@ async function startServer() {
     (loginBruteForceCleanupTimer as any).unref();
   }
 
+  const getAvailableRolesForUser = async (userId: number, primaryRole: Role) => {
+    const assignments = await prisma.userRoleAssignment.findMany({
+      where: { userId },
+      select: { role: true }
+    });
+    return buildAvailableRoles(primaryRole, assignments.map((assignment) => assignment.role));
+  };
+
   const signAccessToken = (user: AuthUser) => {
+    const activeRole = Object.values(Role).includes(user.activeRole) ? user.activeRole : user.role;
+    const availableRoles = buildAvailableRoles(user.role, user.availableRoles);
     return jwt.sign(
-      { role: user.role, technicianId: user.technicianId, organizationId: user.organizationId },
+      { role: user.role, activeRole, availableRoles, technicianId: user.technicianId, organizationId: user.organizationId },
       JWT_SECRET,
       { subject: String(user.id), expiresIn: `${ACCESS_TOKEN_TTL_MINUTES}m` }
     );
@@ -1083,12 +1116,25 @@ async function startServer() {
     }
 
     if (ALLOW_DEMO_TOKEN && DEMO_API_TOKEN && token === DEMO_API_TOKEN) {
-      req.user = { id: 0, role: Role.ADMIN, technicianId: null, organizationId: 1 };
+      req.user = {
+        id: 0,
+        role: Role.ADMIN,
+        activeRole: Role.ADMIN,
+        availableRoles: [Role.ADMIN],
+        technicianId: null,
+        organizationId: 1
+      };
       return next();
     }
 
     try {
-      const payload = jwt.verify(token, JWT_SECRET) as JwtPayload & { role?: Role; technicianId?: number | null; organizationId?: number | null };
+      const payload = jwt.verify(token, JWT_SECRET) as JwtPayload & {
+        role?: Role;
+        activeRole?: Role;
+        availableRoles?: Role[];
+        technicianId?: number | null;
+        organizationId?: number | null;
+      };
       const role = payload.role;
       const organizationId = typeof payload.organizationId === "number" && Number.isInteger(payload.organizationId) && payload.organizationId > 0
         ? payload.organizationId
@@ -1096,9 +1142,20 @@ async function startServer() {
       if (!role || !Object.values(Role).includes(role) || typeof payload.sub !== 'string' || !organizationId) {
         return sendError(res, 401, "Non autorizzato", "UNAUTHORIZED");
       }
+      const activeRole = payload.activeRole && Object.values(Role).includes(payload.activeRole)
+        ? payload.activeRole
+        : role;
+      const availableRoles = buildAvailableRoles(
+        role,
+        Array.isArray(payload.availableRoles)
+          ? payload.availableRoles.filter((candidate): candidate is Role => Object.values(Role).includes(candidate))
+          : []
+      );
       req.user = {
         id: Number(payload.sub),
         role,
+        activeRole,
+        availableRoles,
         technicianId: payload.technicianId ?? null,
         organizationId
       };
@@ -1110,7 +1167,8 @@ async function startServer() {
 
   const requireRole = (...roles: Role[]) => {
     return (req: express.Request, res: express.Response, next: express.NextFunction) => {
-      if (!req.user || !roles.includes(req.user.role)) {
+      const effectiveRole = getEffectiveRole(req.user);
+      if (!effectiveRole || !roles.includes(effectiveRole)) {
         return sendError(res, 403, "Non autorizzato", "FORBIDDEN");
       }
       next();
@@ -1130,8 +1188,20 @@ async function startServer() {
   };
   const isUnauthenticatedApiPath = (apiPath: string) =>
     apiPath.startsWith("/public/") || apiPath === "/health" || apiPath.startsWith("/auth/");
-  const buildRateLimitKey = (req: express.Request) =>
-    req.user?.id ? `u:${req.user.id}` : `ip:${ipKeyGenerator(req.ip || "")}`;
+  // Centralized rate-limit keying keeps prior security semantics consistent:
+  // authenticated traffic is bucketed by user id, anonymous traffic by IP.
+  // IP keys are normalized through express-rate-limit's IPv6-safe helper.
+  const FALLBACK_RATE_LIMIT_IP = "0.0.0.0";
+  const buildIpRateLimitKey = (req: express.Request) => {
+    const normalizedIp = typeof req.ip === "string" && req.ip.trim().length > 0
+      ? req.ip.trim()
+      : FALLBACK_RATE_LIMIT_IP;
+    return `ip:${ipKeyGenerator(normalizedIp)}`;
+  };
+  const buildRateLimitKey = (req: express.Request) => {
+    if (req.user?.id) return `u:${req.user.id}`;
+    return buildIpRateLimitKey(req);
+  };
   const logRateLimitedRequest = (req: express.Request, reason: string) => {
     console.warn("[rate-limit]", JSON.stringify({
       requestId: req.requestId || null,
@@ -1250,7 +1320,7 @@ async function startServer() {
     max: ATTACHMENT_UPLOAD_RATE_LIMIT_MAX,
     standardHeaders: true,
     legacyHeaders: false,
-    keyGenerator: (req) => req.user?.id ? `u:${req.user.id}` : `ip:${ipKeyGenerator(req.ip || "")}`,
+    keyGenerator: buildRateLimitKey,
     handler: (req, res) => {
       logRateLimitedRequest(req, "upload_attachment");
       res.setHeader("Retry-After", String(Math.ceil(ATTACHMENT_UPLOAD_RATE_LIMIT_WINDOW_MS / 1000)));
@@ -1392,7 +1462,7 @@ async function startServer() {
         }
       }
 
-      const ipKey = `ip:${ipKeyGenerator(req.ip || "")}`;
+      const ipKey = buildIpRateLimitKey(req);
       const organizationBucketKey = organizationIdForLogin ? `org:${organizationIdForLogin}` : "org:legacy";
       const identifierKey = `id:${organizationBucketKey}:${normalizedIdentifier}`;
       const nowMs = Date.now();
@@ -1436,34 +1506,22 @@ async function startServer() {
           });
         }
       } else {
-        const resolveUniqueLegacyUser = async (where: Prisma.UserWhereInput) => {
-          const matches = await prisma.user.findMany({
-            where,
-            take: 2,
-            orderBy: { id: "asc" }
-          });
-          if (matches.length > 1) {
-            ambiguousWithoutOrganization = true;
-            return null;
-          }
-          return matches[0] ?? null;
-        };
-
-        user = await resolveUniqueLegacyUser({
-          isActive: true,
-          email: { equals: normalizedIdentifier, mode: 'insensitive' }
+        const matches = await prisma.user.findMany({
+          where: {
+            isActive: true,
+            OR: [
+              { email: { equals: normalizedIdentifier, mode: 'insensitive' } },
+              { username: { equals: normalizedIdentifier, mode: 'insensitive' } },
+              { phone: normalizedIdentifier }
+            ]
+          },
+          take: 2,
+          orderBy: { id: "asc" }
         });
-        if (!user && !ambiguousWithoutOrganization) {
-          user = await resolveUniqueLegacyUser({
-            isActive: true,
-            username: { equals: normalizedIdentifier, mode: 'insensitive' }
-          });
-        }
-        if (!user && !ambiguousWithoutOrganization) {
-          user = await resolveUniqueLegacyUser({
-            isActive: true,
-            phone: normalizedIdentifier
-          });
+        if (matches.length > 1) {
+          ambiguousWithoutOrganization = true;
+        } else {
+          user = matches[0] ?? null;
         }
       }
 
@@ -1490,9 +1548,13 @@ async function startServer() {
       clearLoginFailureTracking(loginIdentifierBuckets, identifierKey);
       logLoginAuditEvent(req, "login_success", normalizedIdentifier);
 
+      const availableRoles = await getAvailableRolesForUser(user.id, user.role);
+      const activeRole = user.role;
       const authUser: AuthUser = {
         id: user.id,
         role: user.role,
+        activeRole,
+        availableRoles,
         technicianId: user.technicianId ?? null,
         organizationId: user.organizationId ?? null
       };
@@ -1507,6 +1569,8 @@ async function startServer() {
           id: user.id,
           name: user.name,
           role: user.role,
+          activeRole,
+          availableRoles,
           technicianId: user.technicianId ?? null,
           organizationId: user.organizationId ?? null
         }
@@ -1545,9 +1609,13 @@ async function startServer() {
       });
 
       const newRefreshToken = await createRefreshToken(stored.userId);
+      const availableRoles = await getAvailableRolesForUser(stored.userId, stored.user.role);
+      const activeRole = stored.user.role;
       const accessToken = signAccessToken({
         id: stored.userId,
         role: stored.user.role,
+        activeRole,
+        availableRoles,
         technicianId: stored.user.technicianId ?? null,
         organizationId: stored.user.organizationId ?? null
       });
@@ -1596,12 +1664,18 @@ async function startServer() {
       if (!user || !user.isActive) {
         return res.status(401).json({ ok: false, error: "Non autorizzato" });
       }
+      const availableRoles = await getAvailableRolesForUser(user.id, user.role);
+      const activeRole = req.user.activeRole && availableRoles.includes(req.user.activeRole)
+        ? req.user.activeRole
+        : user.role;
       res.json({
         ok: true,
         user: {
           id: user.id,
           name: user.name,
           role: user.role,
+          activeRole,
+          availableRoles,
           technicianId: user.technicianId ?? null,
           organizationId: user.organizationId ?? null
         }
@@ -1609,6 +1683,58 @@ async function startServer() {
     } catch (error) {
       console.error(error);
       res.status(500).json({ ok: false, error: "Failed to fetch user" });
+    }
+  });
+
+  app.post("/api/auth/switch-role", requireAuth, requireJsonContentType, async (req, res) => {
+    try {
+      if (!req.user) return res.status(401).json({ ok: false, error: "Non autorizzato" });
+      const requestedRole = req.body?.activeRole as Role | undefined;
+      if (!requestedRole || !Object.values(Role).includes(requestedRole)) {
+        return sendError(res, 400, "Ruolo non valido", "INVALID_ROLE");
+      }
+
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
+      const user = await prisma.user.findFirst({
+        where: { id: req.user.id, organizationId },
+        select: { id: true, name: true, role: true, technicianId: true, organizationId: true, isActive: true }
+      });
+      if (!user || !user.isActive) {
+        return res.status(401).json({ ok: false, error: "Non autorizzato" });
+      }
+
+      const availableRoles = await getAvailableRolesForUser(user.id, user.role);
+      if (!availableRoles.includes(requestedRole)) {
+        return sendError(res, 403, "Ruolo non assegnato all'utente", "ROLE_NOT_ASSIGNED");
+      }
+
+      const authUser: AuthUser = {
+        id: user.id,
+        role: user.role,
+        activeRole: requestedRole,
+        availableRoles,
+        technicianId: user.technicianId ?? null,
+        organizationId: user.organizationId ?? null
+      };
+      const accessToken = signAccessToken(authUser);
+
+      return res.json({
+        ok: true,
+        accessToken,
+        user: {
+          id: user.id,
+          name: user.name,
+          role: user.role,
+          activeRole: requestedRole,
+          availableRoles,
+          technicianId: user.technicianId ?? null,
+          organizationId: user.organizationId ?? null
+        }
+      });
+    } catch (error) {
+      console.error(error);
+      return res.status(500).json({ ok: false, error: "Cambio ruolo fallito" });
     }
   });
 
@@ -1661,6 +1787,20 @@ async function startServer() {
         auditLog(req, action, {}, "error", { status: 400 });
         return sendError(res, 400, "Username non valido", "INVALID_USERNAME");
       }
+      const technicianId = parsed.data.technicianId ?? null;
+      if (parsed.data.role === Role.TECHNICIAN && !technicianId) {
+        auditLog(req, action, {}, "error", { status: 400, field: "technicianId" });
+        return sendError(res, 400, "technicianId obbligatorio per ruolo TECHNICIAN", "TECHNICIAN_ID_REQUIRED");
+      }
+      if (technicianId !== null) {
+        const technicianExists = await prisma.technician.count({
+          where: { id: technicianId, organizationId }
+        });
+        if (technicianExists === 0) {
+          auditLog(req, action, {}, "error", { status: 400, field: "technicianId" });
+          return sendError(res, 400, "technicianId non valido per l'organizzazione", "INVALID_TECHNICIAN_ID");
+        }
+      }
       const email = normalizeLoginEmail(parsed.data.email);
       const passwordHash = await bcrypt.hash(parsed.data.password, 10);
 
@@ -1672,6 +1812,7 @@ async function startServer() {
           email,
           passwordHash,
           role: parsed.data.role,
+          technicianId,
           isActive: parsed.data.isActive ?? true
         },
         select: userPublicSelect
@@ -1718,7 +1859,7 @@ async function startServer() {
 
       const existing = await prisma.user.findFirst({
         where: { id: userId, organizationId },
-        select: { id: true, role: true, isActive: true }
+        select: { id: true, role: true, isActive: true, technicianId: true }
       });
       if (!existing) {
         auditLog(req, action, { userId }, "not_found", { status: 404 });
@@ -1726,6 +1867,9 @@ async function startServer() {
       }
 
       const nextRole = parsed.data.role ?? existing.role;
+      const nextTechnicianId = parsed.data.technicianId !== undefined
+        ? parsed.data.technicianId
+        : existing.technicianId;
       const nextIsActive = parsed.data.isActive ?? existing.isActive;
       const isRoleDemotionFromAdmin = existing.role === Role.ADMIN && nextRole !== Role.ADMIN;
       const isRemovingActiveAdmin =
@@ -1749,8 +1893,21 @@ async function startServer() {
           return sendError(res, 409, LAST_ACTIVE_ADMIN_BLOCK_MESSAGE, "LAST_ACTIVE_ADMIN_REQUIRED");
         }
       }
+      if (nextRole === Role.TECHNICIAN && !nextTechnicianId) {
+        auditLog(req, action, { userId }, "error", { status: 400, field: "technicianId" });
+        return sendError(res, 400, "technicianId obbligatorio per ruolo TECHNICIAN", "TECHNICIAN_ID_REQUIRED");
+      }
+      if (nextTechnicianId !== null) {
+        const technicianExists = await prisma.technician.count({
+          where: { id: nextTechnicianId, organizationId }
+        });
+        if (technicianExists === 0) {
+          auditLog(req, action, { userId }, "error", { status: 400, field: "technicianId" });
+          return sendError(res, 400, "technicianId non valido per l'organizzazione", "INVALID_TECHNICIAN_ID");
+        }
+      }
 
-      const data: Prisma.UserUpdateInput = {};
+      const data: Prisma.UserUncheckedUpdateManyInput = {};
       if (parsed.data.username !== undefined) {
         const username = normalizeUsername(parsed.data.username);
         if (!USERNAME_PATTERN.test(username)) {
@@ -1764,6 +1921,9 @@ async function startServer() {
       }
       if (parsed.data.role !== undefined) {
         data.role = parsed.data.role;
+      }
+      if (parsed.data.technicianId !== undefined) {
+        data.technicianId = parsed.data.technicianId;
       }
       if (parsed.data.isActive !== undefined) {
         data.isActive = parsed.data.isActive;
@@ -2472,7 +2632,7 @@ async function startServer() {
         return res.status(400).json({ ok: false, error: 'Intervallo date non valido: dateFrom deve essere <= dateTo' });
       }
 
-      if (req.user?.role === Role.TECHNICIAN) {
+      if (getEffectiveRole(req.user) === Role.TECHNICIAN) {
         if (!req.user.technicianId) {
           return res.status(403).json({ ok: false, error: "Non autorizzato" });
         }
@@ -2750,7 +2910,7 @@ async function startServer() {
           address: { contains: token, mode: "insensitive" }
         }))
       };
-      if (req.user?.role === Role.TECHNICIAN) {
+      if (getEffectiveRole(req.user) === Role.TECHNICIAN) {
         if (!req.user.technicianId) {
           return res.status(403).json({ ok: false, error: "Non autorizzato" });
         }
@@ -5184,6 +5344,23 @@ async function startServer() {
     app.use(vite.middlewares);
   }
 
+  // Helper used to guard SPA index fallback from clearly invalid/sensitive file-like probes.
+  const isSuspiciousOrFileLikeSpaPath = (rawPath: string): boolean => {
+    const normalizedPath = String(rawPath || "").toLowerCase();
+    const segments = normalizedPath.split("/").filter(Boolean);
+    if (segments.some((segment) => /^\.[^/]+$/.test(segment))) {
+      return true;
+    }
+    const lastSegment = segments[segments.length - 1] ?? "";
+    if (/\.(env|json|config|ya?ml|ini|log|sql)$/i.test(lastSegment)) {
+      return true;
+    }
+    if (/\.[a-z0-9]{1,10}$/i.test(lastSegment)) {
+      return true;
+    }
+    return false;
+  };
+
   if (process.env.NODE_ENV === "production") {
     const distDir = path.join(__dirname, "dist");
     app.use(express.static(distDir, {
@@ -5205,6 +5382,9 @@ async function startServer() {
     }));
     app.get("*", (req, res, next) => {
       if (req.path.startsWith("/api/")) return next();
+      if (isSuspiciousOrFileLikeSpaPath(req.path)) {
+        return res.status(404).send("Not Found");
+      }
       res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
       res.sendFile(path.join(distDir, "index.html"), (err) => {
         if (err) next(err);

@@ -37,16 +37,16 @@ function urlBase64ToUint8Array(base64String: string) {
 type AllowedRole = Exclude<UserRole, null>;
 
 function ProtectedRoute({ children, allowedRoles }: { children: React.ReactNode, allowedRoles: AllowedRole[] }) {
-  const { role } = useAuth();
-  if (!role) return <Navigate to="/login" />;
+  const { activeRole } = useAuth();
+  if (!activeRole) return <Navigate to="/login" />;
 
-  if (allowedRoles.includes(role)) return <>{children}</>;
+  if (allowedRoles.includes(activeRole)) return <>{children}</>;
 
-  if (role === 'TECHNICIAN' && !allowedRoles.includes('TECHNICIAN')) {
+  if (activeRole === 'TECHNICIAN' && !allowedRoles.includes('TECHNICIAN')) {
     return <Navigate to="/technician" />;
   }
 
-  if ((role === 'ADMIN' || role === 'DISPATCHER') && allowedRoles.includes('TECHNICIAN')) {
+  if ((activeRole === 'ADMIN' || activeRole === 'DISPATCHER') && allowedRoles.includes('TECHNICIAN')) {
     return <Navigate to="/dispatcher" />;
   }
 
@@ -54,7 +54,7 @@ function ProtectedRoute({ children, allowedRoles }: { children: React.ReactNode,
 }
 
 function AppInner() {
-  const { role, technicianId } = useAuth();
+  const { activeRole, technicianId } = useAuth();
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
   const [isSyncing, setIsSyncing] = useState(false);
   const isSyncingRef = useRef(false);
@@ -145,7 +145,7 @@ function AppInner() {
       setShowPushPrompt(false);
       return;
     }
-    if (!('serviceWorker' in navigator) || !('PushManager' in window) || !role) return;
+    if (!('serviceWorker' in navigator) || !('PushManager' in window) || !activeRole) return;
     if (Notification.permission === 'default' && !isPushPromptDismissed()) {
       const t = window.setTimeout(() => openPushPrompt(), 3000);
       return () => window.clearTimeout(t);
@@ -153,7 +153,7 @@ function AppInner() {
     if (Notification.permission === 'granted') {
       void subscribeToPush();
     }
-  }, [role, technicianId, pushEnabled]);
+  }, [activeRole, technicianId, pushEnabled]);
 
   const subscribeToPush = async () => {
     if (!pushEnabled) return;
@@ -180,7 +180,7 @@ function AppInner() {
             auth: subscription.toJSON().keys?.auth
           },
           technicianId: technicianId,
-          role: role
+          role: activeRole
         })
       });
       if (!res.ok) {
@@ -487,7 +487,7 @@ function AppInner() {
       return;
     }
 
-    const targetPath = role === 'TECHNICIAN' ? '/technician' : '/dispatcher';
+    const targetPath = activeRole === 'TECHNICIAN' ? '/technician' : '/dispatcher';
     window.dispatchEvent(new CustomEvent('open-intervention', { detail: { id } }));
 
     if (!window.location.pathname.startsWith(targetPath)) {
@@ -499,7 +499,7 @@ function AppInner() {
   };
 
   const refreshInterventionsFromOutbox = () => {
-    const targetPath = role === 'TECHNICIAN' ? '/technician' : '/dispatcher';
+    const targetPath = activeRole === 'TECHNICIAN' ? '/technician' : '/dispatcher';
     if (!window.location.pathname.startsWith(targetPath)) {
       window.location.href = targetPath;
       return;
@@ -507,9 +507,9 @@ function AppInner() {
     window.dispatchEvent(new Event('refresh-interventions'));
   };
 
-  const loginRouteElement = role
+  const loginRouteElement = activeRole
     ? (
-      <Navigate to={role === 'TECHNICIAN' ? '/technician' : '/dispatcher'} replace />
+      <Navigate to={activeRole === 'TECHNICIAN' ? '/technician' : '/dispatcher'} replace />
     )
     : <LoginPage />;
 

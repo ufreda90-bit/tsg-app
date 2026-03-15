@@ -6,6 +6,8 @@ export type UserRole = 'ADMIN' | 'DISPATCHER' | 'TECHNICIAN' | null;
 interface AuthContextType {
   user: AuthUser | null;
   role: UserRole;
+  activeRole: UserRole;
+  availableRoles: UserRole[];
   technicianId: number | null;
   setSession: (user: AuthUser, accessToken: string) => void;
   logout: () => Promise<void>;
@@ -76,10 +78,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const role = user?.role ?? null;
+  const activeRole = user?.activeRole ?? role;
+  const availableRoles = user?.availableRoles ?? (role ? [role] : []);
   const technicianId = user?.technicianId ?? null;
 
   return (
-    <AuthContext.Provider value={{ user, role, technicianId, setSession, logout }}>
+    <AuthContext.Provider value={{ user, role, activeRole, availableRoles, technicianId, setSession, logout }}>
       {children}
     </AuthContext.Provider>
   );

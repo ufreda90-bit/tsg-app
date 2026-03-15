@@ -106,12 +106,25 @@ model User {
 
   refreshTokens RefreshToken[]
   auditLogs     AuditLog[]
+  roleAssignments UserRoleAssignment[]
 
   @@unique([organizationId, username])
   @@unique([organizationId, email])
   @@unique([organizationId, technicianId])
   @@index([role])
   @@index([organizationId])
+}
+
+model UserRoleAssignment {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      Role
+  createdAt DateTime @default(now())
+
+  @@unique([userId, role])
+  @@index([userId])
+  @@index([role])
 }
 
 model AuditLog {
