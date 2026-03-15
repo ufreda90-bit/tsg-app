@@ -15,7 +15,9 @@ import fs from "fs";
 import { promises as fsPromises } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { createRequire } from "module";
 import multer from "multer";
+import helmet from "helmet";
 import {
   computeStoppedWorkReportMinutes,
   stopWorkReportInTransaction
@@ -38,6 +40,7 @@ type AuthUser = {
   id: number;
   role: Role;
   technicianId: number | null;
+  organizationId: number | null;
 };
 
 declare global {
@@ -52,6 +55,7 @@ declare global {
 const prisma = new PrismaClient();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const requireModule = createRequire(import.meta.url);
 
 function logApiError(req: express.Request, error: unknown) {
   const requestId = req.requestId || "-";
@@ -113,7 +117,7 @@ function normalizeUsername(input: string): string {
   return input.trim().toLowerCase();
 }
 
-type AuditOutcome = "success" | "noop" | "conflict" | "forbidden" | "not_found" | "error";
+type AuditOutcome = "success" | "noop" | "conflict" | "forbidden" | "not_found" | "error" | "failed" | "blocked";
 type AuditEntity = Record<string, string | number | null | undefined>;
 type AuditMeta = Record<string, string | number | boolean | null | undefined>;
 
@@ -132,6 +136,13 @@ function auditLog(
   meta?: AuditMeta
 ) {
   try {
+    const filteredEntityEntries = Object.entries(entity).filter(([, value]) => value !== undefined && value !== null);
+    const filteredMetaEntries = Object.entries(meta || {}).filter(([, value]) => value !== undefined);
+    const filteredMeta = Object.fromEntries(filteredMetaEntries);
+    const [firstEntityKey, firstEntityValue] = filteredEntityEntries[0] || [];
+    const entityName = typeof firstEntityKey === "string" ? firstEntityKey.replace(/Id$/, "") : null;
+    const entityId = firstEntityValue === undefined || firstEntityValue === null ? null : String(firstEntityValue);
+
     const payload: Record<string, unknown> = {
       type: "AUDIT",
       ts: new Date().toISOString(),
@@ -139,22 +150,44 @@ function auditLog(
       user: req.user ? { id: req.user.id, role: req.user.role } : null,
       ip: req.ip || null,
       action,
-      entity,
+      entity: Object.fromEntries(filteredEntityEntries),
       outcome
     };
-    if (meta && Object.keys(meta).length > 0) {
-      payload.meta = meta;
+    if (Object.keys(filteredMeta).length > 0) {
+      payload.meta = filteredMeta;
     }
     const line = JSON.stringify(payload);
     if (outcome === "success" || outcome === "noop") {
       console.info(line);
-      return;
-    }
-    if (outcome === "conflict" || outcome === "forbidden" || outcome === "not_found") {
+    } else if (outcome === "conflict" || outcome === "forbidden" || outcome === "not_found" || outcome === "blocked") {
       console.warn(line);
-      return;
+    } else {
+      console.error(line);
     }
-    console.error(line);
+
+    const metadataForDb =
+      Object.keys(filteredMeta).length > 0 || filteredEntityEntries.length > 1
+        ? {
+            ...filteredMeta,
+            ...(filteredEntityEntries.length > 0 ? { entity: Object.fromEntries(filteredEntityEntries) } : {})
+          }
+        : undefined;
+
+    void prisma.auditLog.create({
+      data: {
+        organizationId: req.user?.organizationId ?? null,
+        userId: req.user?.id ?? null,
+        action,
+        entity: entityName,
+        entityId,
+        status: outcome,
+        metadata: metadataForDb as Prisma.InputJsonValue | undefined,
+        ip: req.ip || null,
+        requestId: req.requestId || null
+      }
+    }).catch((error) => {
+      console.error("[AUDIT_DB_ERROR]", error);
+    });
   } catch {
     // never throw from audit logging
   }
@@ -260,8 +293,12 @@ function toAttachmentDto<T extends { id: string; kind: string; mimeType: string;
   };
 }
 
-function userCanAccessIntervention(user: AuthUser | undefined, intervention: { technicianId: number | null; secondaryTechnicianId: number | null }) {
+function userCanAccessIntervention(
+  user: AuthUser | undefined,
+  intervention: { organizationId: number; technicianId: number | null; secondaryTechnicianId: number | null }
+) {
   if (!user) return false;
+  if (!user.organizationId || intervention.organizationId !== user.organizationId) return false;
   if (user.role === Role.ADMIN || user.role === Role.DISPATCHER) return true;
   if (user.role !== Role.TECHNICIAN || !user.technicianId) return false;
   return intervention.technicianId === user.technicianId || intervention.secondaryTechnicianId === user.technicianId;
@@ -321,7 +358,7 @@ type ResolvedAttachmentDownload = {
   storedName: string;
   mimeType: string;
   originalName: string;
-  access: { technicianId: number | null; secondaryTechnicianId: number | null };
+  access: { organizationId: number; technicianId: number | null; secondaryTechnicianId: number | null };
 };
 
 const storedTeamSchema = z.object({
@@ -446,21 +483,21 @@ function uniquePositiveIntIds(values: number[]) {
   return [...deduped];
 }
 
-async function resolveAttachmentForDownload(attachmentId: string): Promise<ResolvedAttachmentDownload | null> {
+async function resolveAttachmentForDownload(attachmentId: string, organizationId: number): Promise<ResolvedAttachmentDownload | null> {
   const [interventionAttachment, workReportAttachment] = await Promise.all([
-    prisma.interventionAttachment.findUnique({
-      where: { id: attachmentId },
+    prisma.interventionAttachment.findFirst({
+      where: { id: attachmentId, organizationId },
       select: {
         id: true,
         mimeType: true,
         originalName: true,
         storedName: true,
         interventionId: true,
-        intervention: { select: { technicianId: true, secondaryTechnicianId: true } }
+        intervention: { select: { organizationId: true, technicianId: true, secondaryTechnicianId: true } }
       }
     }),
-    prisma.workReportAttachment.findUnique({
-      where: { id: attachmentId },
+    prisma.workReportAttachment.findFirst({
+      where: { id: attachmentId, organizationId },
       select: {
         id: true,
         mimeType: true,
@@ -469,7 +506,7 @@ async function resolveAttachmentForDownload(attachmentId: string): Promise<Resol
         workReport: {
           select: {
             interventionId: true,
-            intervention: { select: { technicianId: true, secondaryTechnicianId: true } }
+            intervention: { select: { organizationId: true, technicianId: true, secondaryTechnicianId: true } }
           }
         }
       }
@@ -588,17 +625,20 @@ function normalizeManualActualMinutes(value: unknown): number | undefined {
   return normalized;
 }
 
-async function getOrCreateWorkReport(tx: Prisma.TransactionClient, interventionId: number) {
-  const existing = await tx.workReport.findUnique({ where: { interventionId } });
+async function getOrCreateWorkReport(tx: Prisma.TransactionClient, interventionId: number, organizationId: number) {
+  const existing = await tx.workReport.findFirst({ where: { interventionId, organizationId } });
   if (existing) return existing;
 
   let retries = 2;
   while (retries >= 0) {
     try {
-      const max = await tx.workReport.aggregate({ _max: { reportNumber: true } });
+      const max = await tx.workReport.aggregate({
+        where: { organizationId },
+        _max: { reportNumber: true }
+      });
       const next = (max._max.reportNumber ?? -1) + 1;
       return await tx.workReport.create({
-        data: { interventionId, reportNumber: next }
+        data: { interventionId, organizationId, reportNumber: next }
       });
     } catch (err: any) {
       if (err.code === 'P2002' && retries > 0) {
@@ -678,6 +718,7 @@ const WORK_REPORT_TIMING_CONFLICT_MESSAGE = "Work report was updated by another 
 
 async function startServer() {
   const app = express();
+  app.disable("x-powered-by");
   const PORT = Number(process.env.PORT || 3000);
   const isProduction = process.env.NODE_ENV === "production";
   const isTruthyEnv = (value: string | undefined) => ["1", "true", "yes"].includes(String(value ?? "").trim().toLowerCase());
@@ -713,6 +754,17 @@ async function startServer() {
     res.setHeader("X-Request-Id", req.requestId);
     next();
   });
+  app.use(helmet({
+    // CSP is enforced at the reverse proxy layer to avoid conflicts with SPA/PWA runtime.
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false,
+    crossOriginResourcePolicy: false,
+    frameguard: { action: "deny" },
+    noSniff: true,
+    referrerPolicy: { policy: "no-referrer" },
+    crossOriginOpenerPolicy: { policy: "same-origin" },
+    strictTransportSecurity: false
+  }));
 
   const requestLogger: express.RequestHandler = (req, res, next) => {
     const start = Date.now();
@@ -767,22 +819,42 @@ async function startServer() {
       res.setHeader("Cache-Control", "no-store");
     }
 
-    res.setHeader("X-Content-Type-Options", "nosniff");
-    res.setHeader("Referrer-Policy", "no-referrer");
-    res.setHeader("X-Frame-Options", "DENY");
     res.setHeader("Permissions-Policy", "geolocation=(), microphone=(), camera=()");
     res.setHeader("Cross-Origin-Resource-Policy", "same-site");
-    res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
     res.setHeader("Cross-Origin-Embedder-Policy", "unsafe-none");
     next();
   });
+
+  const HTTP_COMPRESSION_THRESHOLD_BYTES_RAW = Number(process.env.HTTP_COMPRESSION_THRESHOLD_BYTES ?? 1024);
+  const HTTP_COMPRESSION_THRESHOLD_BYTES =
+    Number.isFinite(HTTP_COMPRESSION_THRESHOLD_BYTES_RAW) && HTTP_COMPRESSION_THRESHOLD_BYTES_RAW >= 0
+      ? Math.floor(HTTP_COMPRESSION_THRESHOLD_BYTES_RAW)
+      : 1024;
 
   if (isProduction) {
     try {
       const compressionModuleName = "compression";
       const compressionModule = await import(compressionModuleName);
       const compressionMiddlewareFactory = (compressionModule as any).default ?? compressionModule;
-      app.use(compressionMiddlewareFactory({ threshold: 1024 }));
+      const defaultCompressionFilter: (req: express.Request, res: express.Response) => boolean =
+        typeof compressionMiddlewareFactory.filter === "function"
+          ? compressionMiddlewareFactory.filter.bind(compressionMiddlewareFactory)
+          : () => true;
+      app.use(compressionMiddlewareFactory({
+        threshold: HTTP_COMPRESSION_THRESHOLD_BYTES,
+        filter: (req: express.Request, res: express.Response) => {
+          // Allow explicit per-request opt-out (debug/proxy diagnostics).
+          if (req.headers["x-no-compression"]) return false;
+          // Binary attachment downloads are already compressed/non-compressible in most cases.
+          if (req.path.startsWith("/api/attachments/") && req.path.endsWith("/download")) return false;
+          const contentDisposition = String(res.getHeader("Content-Disposition") || "").toLowerCase();
+          if (contentDisposition.startsWith("attachment;")) return false;
+          const contentEncoding = String(res.getHeader("Content-Encoding") || "").toLowerCase();
+          if (contentEncoding && contentEncoding !== "identity") return false;
+          return defaultCompressionFilter(req, res);
+        }
+      }));
+      // Keep Brotli at reverse-proxy layer (Nginx) to avoid app-level complexity.
     } catch (error) {
       console.warn("[startup] compression middleware non disponibile, avvio senza compression");
     }
@@ -791,33 +863,6 @@ async function startServer() {
   // Limiti body env-driven (non applicati ai multipart gestiti da multer)
   app.use(express.json({ limit: BODY_JSON_LIMIT }));
   app.use(express.urlencoded({ limit: BODY_URLENCODED_LIMIT, extended: true }));
-
-  // API Rate Limiting
-  const apiLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 300,
-    message: { error: "Troppe richieste. Riprova più tardi." }
-  });
-  app.use("/api/", apiLimiter);
-
-  const publicLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 60,
-    message: { error: "Troppi tentativi, riprova più tardi." }
-  });
-  app.use("/api/public/", publicLimiter);
-
-  const publicSignGetLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 30,
-    message: { error: "Troppe richieste. Riprova più tardi." }
-  });
-
-  const publicSignPostLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 10,
-    message: { error: "Troppe richieste. Riprova più tardi." }
-  });
 
   // AUTH CONFIG
   const JWT_SECRET = process.env.JWT_SECRET;
@@ -844,10 +889,126 @@ async function startServer() {
       ? SIGN_TOKEN_TTL_HOURS_RAW
       : 168;
   const WORK_REPORT_EMAIL_ENABLED = process.env.WORK_REPORT_EMAIL_ENABLED === 'true';
+  const LOGIN_BRUTE_FORCE_WINDOW_MS_RAW = Number(process.env.LOGIN_BRUTE_FORCE_WINDOW_MS ?? 15 * 60 * 1000);
+  const LOGIN_BRUTE_FORCE_WINDOW_MS =
+    Number.isFinite(LOGIN_BRUTE_FORCE_WINDOW_MS_RAW) && LOGIN_BRUTE_FORCE_WINDOW_MS_RAW > 0
+      ? Math.floor(LOGIN_BRUTE_FORCE_WINDOW_MS_RAW)
+      : 15 * 60 * 1000;
+  const LOGIN_BRUTE_FORCE_MAX_FAILED_RAW = Number(process.env.LOGIN_BRUTE_FORCE_MAX_FAILED ?? 8);
+  const LOGIN_BRUTE_FORCE_MAX_FAILED =
+    Number.isFinite(LOGIN_BRUTE_FORCE_MAX_FAILED_RAW) && LOGIN_BRUTE_FORCE_MAX_FAILED_RAW > 0
+      ? Math.floor(LOGIN_BRUTE_FORCE_MAX_FAILED_RAW)
+      : 8;
+  const LOGIN_BRUTE_FORCE_LOCK_MS_RAW = Number(process.env.LOGIN_BRUTE_FORCE_LOCK_MS ?? 15 * 60 * 1000);
+  const LOGIN_BRUTE_FORCE_LOCK_MS =
+    Number.isFinite(LOGIN_BRUTE_FORCE_LOCK_MS_RAW) && LOGIN_BRUTE_FORCE_LOCK_MS_RAW > 0
+      ? Math.floor(LOGIN_BRUTE_FORCE_LOCK_MS_RAW)
+      : 15 * 60 * 1000;
+
+  type LoginAttemptBucket = {
+    windowStartMs: number;
+    failedAttempts: number;
+    lockUntilMs: number;
+    updatedAtMs: number;
+  };
+
+  const loginIpBuckets = new Map<string, LoginAttemptBucket>();
+  const loginIdentifierBuckets = new Map<string, LoginAttemptBucket>();
+
+  const normalizeLoginIdentifierForBucket = (value: string | null | undefined) =>
+    String(value || "").trim().toLowerCase();
+
+  const maskLoginIdentifierForAudit = (identifier: string) => {
+    if (!identifier) return "empty";
+    if (identifier.length <= 4) return `${identifier[0] || "*"}***`;
+    return `${identifier.slice(0, 2)}***${identifier.slice(-2)}`;
+  };
+
+  const logLoginAuditEvent = (req: express.Request, event: "login_failed" | "login_blocked" | "login_success", normalizedIdentifier: string) => {
+    const statusByEvent: Record<"login_failed" | "login_blocked" | "login_success", AuditOutcome> = {
+      login_failed: "failed",
+      login_blocked: "blocked",
+      login_success: "success"
+    };
+    auditLog(
+      req,
+      event,
+      {},
+      statusByEvent[event],
+      { identifier: maskLoginIdentifierForAudit(normalizedIdentifier) }
+    );
+  };
+
+  const getOrCreateLoginBucket = (store: Map<string, LoginAttemptBucket>, key: string, nowMs: number) => {
+    const existing = store.get(key);
+    if (!existing) {
+      const created: LoginAttemptBucket = {
+        windowStartMs: nowMs,
+        failedAttempts: 0,
+        lockUntilMs: 0,
+        updatedAtMs: nowMs
+      };
+      store.set(key, created);
+      return created;
+    }
+    if (nowMs - existing.windowStartMs > LOGIN_BRUTE_FORCE_WINDOW_MS && nowMs >= existing.lockUntilMs) {
+      existing.windowStartMs = nowMs;
+      existing.failedAttempts = 0;
+    }
+    existing.updatedAtMs = nowMs;
+    return existing;
+  };
+
+  const getLoginBucketRetryAfterSeconds = (store: Map<string, LoginAttemptBucket>, key: string, nowMs: number) => {
+    const bucket = store.get(key);
+    if (!bucket) return 0;
+    bucket.updatedAtMs = nowMs;
+    if (bucket.lockUntilMs <= nowMs) return 0;
+    return Math.ceil((bucket.lockUntilMs - nowMs) / 1000);
+  };
+
+  const recordLoginFailure = (store: Map<string, LoginAttemptBucket>, key: string, nowMs: number) => {
+    if (!key) return;
+    const bucket = getOrCreateLoginBucket(store, key, nowMs);
+    if (nowMs - bucket.windowStartMs > LOGIN_BRUTE_FORCE_WINDOW_MS) {
+      bucket.windowStartMs = nowMs;
+      bucket.failedAttempts = 0;
+    }
+    bucket.failedAttempts += 1;
+    bucket.updatedAtMs = nowMs;
+    if (bucket.failedAttempts >= LOGIN_BRUTE_FORCE_MAX_FAILED) {
+      bucket.lockUntilMs = nowMs + LOGIN_BRUTE_FORCE_LOCK_MS;
+      bucket.windowStartMs = nowMs;
+      bucket.failedAttempts = 0;
+    }
+  };
+
+  const clearLoginFailureTracking = (store: Map<string, LoginAttemptBucket>, key: string) => {
+    if (!key) return;
+    store.delete(key);
+  };
+
+  const LOGIN_BRUTE_FORCE_CLEANUP_INTERVAL_MS = Math.max(60_000, Math.floor(LOGIN_BRUTE_FORCE_WINDOW_MS / 2));
+  const loginBruteForceCleanupTimer = setInterval(() => {
+    const nowMs = Date.now();
+    const staleAfterMs = LOGIN_BRUTE_FORCE_WINDOW_MS + LOGIN_BRUTE_FORCE_LOCK_MS + 60_000;
+    const cleanupStore = (store: Map<string, LoginAttemptBucket>) => {
+      for (const [key, bucket] of store.entries()) {
+        if (bucket.lockUntilMs > nowMs) continue;
+        if (nowMs - bucket.updatedAtMs <= staleAfterMs) continue;
+        store.delete(key);
+      }
+    };
+    cleanupStore(loginIpBuckets);
+    cleanupStore(loginIdentifierBuckets);
+  }, LOGIN_BRUTE_FORCE_CLEANUP_INTERVAL_MS);
+  if (typeof (loginBruteForceCleanupTimer as any).unref === "function") {
+    (loginBruteForceCleanupTimer as any).unref();
+  }
 
   const signAccessToken = (user: AuthUser) => {
     return jwt.sign(
-      { role: user.role, technicianId: user.technicianId },
+      { role: user.role, technicianId: user.technicianId, organizationId: user.organizationId },
       JWT_SECRET,
       { subject: String(user.id), expiresIn: `${ACCESS_TOKEN_TTL_MINUTES}m` }
     );
@@ -863,6 +1024,43 @@ async function startServer() {
       data: { tokenHash, userId, expiresAt }
     });
     return token;
+  };
+  const REFRESH_TOKEN_COOKIE_NAME = "refreshToken";
+  const REFRESH_TOKEN_COOKIE_OPTIONS: express.CookieOptions = {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: "lax",
+    path: "/api/auth/refresh",
+    maxAge: REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000
+  };
+  const setRefreshTokenCookie = (res: express.Response, refreshToken: string) => {
+    res.cookie(REFRESH_TOKEN_COOKIE_NAME, refreshToken, REFRESH_TOKEN_COOKIE_OPTIONS);
+  };
+  const clearRefreshTokenCookie = (res: express.Response) => {
+    res.clearCookie(REFRESH_TOKEN_COOKIE_NAME, REFRESH_TOKEN_COOKIE_OPTIONS);
+  };
+  const getCookieValue = (req: express.Request, cookieName: string) => {
+    const cookieHeader = req.headers.cookie;
+    if (!cookieHeader) return null;
+    for (const part of cookieHeader.split(";")) {
+      const [rawName, ...rawValueParts] = part.split("=");
+      if (rawName?.trim() !== cookieName) continue;
+      const rawValue = rawValueParts.join("=").trim();
+      if (!rawValue) return null;
+      try {
+        return decodeURIComponent(rawValue);
+      } catch {
+        return rawValue;
+      }
+    }
+    return null;
+  };
+  const getRefreshTokenFromRequest = (req: express.Request) => {
+    const fromCookie = getCookieValue(req, REFRESH_TOKEN_COOKIE_NAME);
+    if (fromCookie) return fromCookie;
+    const bodyToken = req.body?.refreshToken;
+    if (typeof bodyToken === "string" && bodyToken.trim()) return bodyToken.trim();
+    return null;
   };
 
   const getTokenFromRequest = (req: express.Request) => {
@@ -885,20 +1083,24 @@ async function startServer() {
     }
 
     if (ALLOW_DEMO_TOKEN && DEMO_API_TOKEN && token === DEMO_API_TOKEN) {
-      req.user = { id: 0, role: Role.ADMIN, technicianId: null };
+      req.user = { id: 0, role: Role.ADMIN, technicianId: null, organizationId: 1 };
       return next();
     }
 
     try {
-      const payload = jwt.verify(token, JWT_SECRET) as JwtPayload & { role?: Role; technicianId?: number | null };
+      const payload = jwt.verify(token, JWT_SECRET) as JwtPayload & { role?: Role; technicianId?: number | null; organizationId?: number | null };
       const role = payload.role;
-      if (!role || !Object.values(Role).includes(role) || typeof payload.sub !== 'string') {
+      const organizationId = typeof payload.organizationId === "number" && Number.isInteger(payload.organizationId) && payload.organizationId > 0
+        ? payload.organizationId
+        : null;
+      if (!role || !Object.values(Role).includes(role) || typeof payload.sub !== 'string' || !organizationId) {
         return sendError(res, 401, "Non autorizzato", "UNAUTHORIZED");
       }
       req.user = {
         id: Number(payload.sub),
         role,
-        technicianId: payload.technicianId ?? null
+        technicianId: payload.technicianId ?? null,
+        organizationId
       };
       return next();
     } catch (err) {
@@ -918,13 +1120,139 @@ async function startServer() {
   const allowAdmin = requireRole(Role.ADMIN);
   const allowDispatcher = requireRole(Role.ADMIN, Role.DISPATCHER);
   const allowTech = requireRole(Role.ADMIN, Role.DISPATCHER, Role.TECHNICIAN);
+  const getOrganizationIdOrReject = (req: express.Request, res: express.Response) => {
+    const organizationId = req.user?.organizationId;
+    if (!organizationId) {
+      sendError(res, 401, "Non autorizzato", "UNAUTHORIZED");
+      return null;
+    }
+    return organizationId;
+  };
+  const isUnauthenticatedApiPath = (apiPath: string) =>
+    apiPath.startsWith("/public/") || apiPath === "/health" || apiPath.startsWith("/auth/");
+  const buildRateLimitKey = (req: express.Request) =>
+    req.user?.id ? `u:${req.user.id}` : `ip:${ipKeyGenerator(req.ip || "")}`;
+  const logRateLimitedRequest = (req: express.Request, reason: string) => {
+    console.warn("[rate-limit]", JSON.stringify({
+      requestId: req.requestId || null,
+      ip: req.ip,
+      path: req.originalUrl || req.url,
+      reason
+    }));
+  };
+  const logSensitiveRequestRejected = (req: express.Request, reason: string) => {
+    console.warn("[anti-bot]", JSON.stringify({
+      requestId: req.requestId || null,
+      ip: req.ip,
+      path: req.originalUrl || req.url,
+      reason
+    }));
+  };
+  const requireSensitiveUserAgent: express.RequestHandler = (req, res, next) => {
+    const rawUserAgent = req.headers["user-agent"];
+    const userAgent = Array.isArray(rawUserAgent)
+      ? rawUserAgent.join(" ").trim()
+      : String(rawUserAgent || "").trim();
+    if (!userAgent) {
+      logSensitiveRequestRejected(req, "missing_user_agent");
+      return sendError(res, 400, "Richiesta non valida", "INVALID_REQUEST");
+    }
+    return next();
+  };
+  const requireJsonContentType: express.RequestHandler = (req, res, next) => {
+    if (req.is("json")) {
+      return next();
+    }
+    logSensitiveRequestRejected(req, "invalid_content_type");
+    return sendError(res, 415, "Content-Type non supportato", "UNSUPPORTED_CONTENT_TYPE");
+  };
+  const Redis = requireModule("ioredis") as any;
+  const { RedisStore } = requireModule("rate-limit-redis") as { RedisStore: any };
+  const redisClient = process.env.REDIS_URL ? new Redis(process.env.REDIS_URL) : null;
+  if (redisClient) {
+    redisClient.on("error", (error) => {
+      console.error("[rate-limit] Redis connection error", error);
+    });
+  }
+  const createRateLimitStore = (prefix: string) => {
+    if (!redisClient) return undefined;
+    return new RedisStore({
+      prefix,
+      sendCommand: (...args: string[]) => (
+        redisClient.call(args[0], ...args.slice(1)) as Promise<unknown>
+      )
+    });
+  };
+  const apiLimiter = rateLimit({
+    store: createRateLimitStore("rl:api:"),
+    windowMs: 15 * 60 * 1000,
+    max: 300,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: buildRateLimitKey,
+    handler: (req, res) => {
+      logRateLimitedRequest(req, "api_general");
+      return res.status(429).json({ error: "Troppe richieste. Riprova più tardi." });
+    }
+  });
+  const authLoginLimiter = rateLimit({
+    store: createRateLimitStore("rl:auth:login:"),
+    windowMs: 15 * 60 * 1000,
+    max: 12,
+    standardHeaders: true,
+    legacyHeaders: false,
+    skipSuccessfulRequests: true,
+    keyGenerator: buildRateLimitKey,
+    handler: (req, res) => {
+      logRateLimitedRequest(req, "auth_login");
+      return res.status(429).json({ error: "Troppi tentativi di login. Riprova più tardi." });
+    }
+  });
+  const authRefreshLimiter = rateLimit({
+    store: createRateLimitStore("rl:auth:refresh:"),
+    windowMs: 15 * 60 * 1000,
+    max: 60,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: buildRateLimitKey,
+    handler: (req, res) => {
+      logRateLimitedRequest(req, "auth_refresh");
+      return res.status(429).json({ error: "Troppi tentativi, riprova più tardi." });
+    }
+  });
+  const publicSignGetLimiter = rateLimit({
+    store: createRateLimitStore("rl:public:sign:get:"),
+    windowMs: 15 * 60 * 1000,
+    max: 30,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: buildRateLimitKey,
+    handler: (req, res) => {
+      logRateLimitedRequest(req, "public_sign_get");
+      return res.status(429).json({ error: "Troppe richieste. Riprova più tardi." });
+    }
+  });
+  const publicSignPostLimiter = rateLimit({
+    store: createRateLimitStore("rl:public:sign:post:"),
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: buildRateLimitKey,
+    handler: (req, res) => {
+      logRateLimitedRequest(req, "public_sign_post");
+      return res.status(429).json({ error: "Troppe richieste. Riprova più tardi." });
+    }
+  });
   const attachmentUploadLimiter = rateLimit({
+    store: createRateLimitStore("rl:upload:attachment:"),
     windowMs: ATTACHMENT_UPLOAD_RATE_LIMIT_WINDOW_MS,
     max: ATTACHMENT_UPLOAD_RATE_LIMIT_MAX,
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: (req) => req.user?.id ? `u:${req.user.id}` : `ip:${ipKeyGenerator(req.ip || "")}`,
-    handler: (_req, res) => {
+    handler: (req, res) => {
+      logRateLimitedRequest(req, "upload_attachment");
       res.setHeader("Retry-After", String(Math.ceil(ATTACHMENT_UPLOAD_RATE_LIMIT_WINDOW_MS / 1000)));
       return sendError(res, 429, "Troppe richieste upload. Riprova più tardi.", "RATE_LIMITED");
     }
@@ -979,10 +1307,16 @@ async function startServer() {
   };
 
   app.use("/api", (req, res, next) => {
-    if (req.path.startsWith("/public/") || req.path === "/health" || req.path.startsWith("/auth/")) {
+    if (isUnauthenticatedApiPath(req.path)) {
       return next();
     }
     return requireAuth(req, res, next);
+  });
+  app.use("/api", (req, res, next) => {
+    if (isUnauthenticatedApiPath(req.path)) {
+      return next();
+    }
+    return apiLimiter(req, res, next);
   });
 
   // --- Push Notifications Config ---
@@ -996,9 +1330,9 @@ async function startServer() {
   }
 
   // Funzione Helper per push ai tecnici
-  const notifyTechnician = async (technicianId: number, title: string, body: string, url: string = '/') => {
+  const notifyTechnician = async (organizationId: number, technicianId: number, title: string, body: string, url: string = '/') => {
     try {
-      const subs = await prisma.pushSubscription.findMany({ where: { technicianId } });
+      const subs = await prisma.pushSubscription.findMany({ where: { organizationId, technicianId } });
       const payload = JSON.stringify({ title, body, url });
 
       for (const sub of subs) {
@@ -1009,7 +1343,7 @@ async function startServer() {
           }, payload);
         } catch (err: any) {
           if (err.statusCode === 410 || err.statusCode === 404) {
-            await prisma.pushSubscription.delete({ where: { id: sub.id } });
+            await prisma.pushSubscription.deleteMany({ where: { id: sub.id, organizationId } });
           }
         }
       }
@@ -1031,59 +1365,150 @@ async function startServer() {
   });
 
   // AUTH ROUTES (public)
-  app.post("/api/auth/login", async (req, res) => {
+  app.post("/api/auth/login", authLoginLimiter, requireSensitiveUserAgent, requireJsonContentType, async (req, res) => {
     try {
-      const { identifier, password } = req.body || {};
+      const { identifier, password, organizationId: rawOrganizationId } = req.body || {};
       if (!identifier || !password) {
         return res.status(400).json({ ok: false, error: "Credenziali mancanti" });
       }
 
-      const normalizedIdentifier = String(identifier).trim();
-      let user = await prisma.user.findFirst({
-        where: {
+      const normalizedIdentifier = normalizeLoginIdentifierForBucket(identifier);
+      if (!normalizedIdentifier) {
+        return res.status(400).json({ ok: false, error: "Credenziali mancanti" });
+      }
+      let organizationIdForLogin: number | null = null;
+      if (rawOrganizationId !== undefined && rawOrganizationId !== null && String(rawOrganizationId).trim() !== "") {
+        const parsedOrganizationId = Number(rawOrganizationId);
+        if (!Number.isInteger(parsedOrganizationId) || parsedOrganizationId <= 0) {
+          return res.status(400).json({ ok: false, error: "Organizzazione non valida" });
+        }
+        organizationIdForLogin = parsedOrganizationId;
+        const organizationExists = await prisma.organization.findUnique({
+          where: { id: organizationIdForLogin },
+          select: { id: true }
+        });
+        if (!organizationExists) {
+          return res.status(400).json({ ok: false, error: "Organizzazione non valida" });
+        }
+      }
+
+      const ipKey = `ip:${ipKeyGenerator(req.ip || "")}`;
+      const organizationBucketKey = organizationIdForLogin ? `org:${organizationIdForLogin}` : "org:legacy";
+      const identifierKey = `id:${organizationBucketKey}:${normalizedIdentifier}`;
+      const nowMs = Date.now();
+      const ipRetryAfter = getLoginBucketRetryAfterSeconds(loginIpBuckets, ipKey, nowMs);
+      const identifierRetryAfter = identifierKey
+        ? getLoginBucketRetryAfterSeconds(loginIdentifierBuckets, identifierKey, nowMs)
+        : 0;
+      const retryAfter = Math.max(ipRetryAfter, identifierRetryAfter);
+      if (retryAfter > 0) {
+        res.setHeader("Retry-After", String(retryAfter));
+        logLoginAuditEvent(req, "login_blocked", normalizedIdentifier);
+        return res.status(429).json({ ok: false, error: "Credenziali non valide" });
+      }
+      let user: Awaited<ReturnType<typeof prisma.user.findFirst>> | null = null;
+      let ambiguousWithoutOrganization = false;
+
+      if (organizationIdForLogin) {
+        user = await prisma.user.findFirst({
+          where: {
+            isActive: true,
+            organizationId: organizationIdForLogin,
+            email: { equals: normalizedIdentifier, mode: 'insensitive' }
+          }
+        });
+        if (!user) {
+          user = await prisma.user.findFirst({
+            where: {
+              isActive: true,
+              organizationId: organizationIdForLogin,
+              username: { equals: normalizedIdentifier, mode: 'insensitive' }
+            }
+          });
+        }
+        if (!user) {
+          user = await prisma.user.findFirst({
+            where: {
+              isActive: true,
+              organizationId: organizationIdForLogin,
+              phone: normalizedIdentifier
+            }
+          });
+        }
+      } else {
+        const resolveUniqueLegacyUser = async (where: Prisma.UserWhereInput) => {
+          const matches = await prisma.user.findMany({
+            where,
+            take: 2,
+            orderBy: { id: "asc" }
+          });
+          if (matches.length > 1) {
+            ambiguousWithoutOrganization = true;
+            return null;
+          }
+          return matches[0] ?? null;
+        };
+
+        user = await resolveUniqueLegacyUser({
           isActive: true,
           email: { equals: normalizedIdentifier, mode: 'insensitive' }
-        }
-      });
-      if (!user) {
-        user = await prisma.user.findFirst({
-          where: {
+        });
+        if (!user && !ambiguousWithoutOrganization) {
+          user = await resolveUniqueLegacyUser({
             isActive: true,
             username: { equals: normalizedIdentifier, mode: 'insensitive' }
-          }
-        });
-      }
-      if (!user) {
-        user = await prisma.user.findFirst({
-          where: {
+          });
+        }
+        if (!user && !ambiguousWithoutOrganization) {
+          user = await resolveUniqueLegacyUser({
             isActive: true,
             phone: normalizedIdentifier
-          }
-        });
+          });
+        }
+      }
+
+      if (ambiguousWithoutOrganization) {
+        return res.status(400).json({ ok: false, error: "Organizzazione richiesta per il login" });
       }
 
       if (!user) {
+        recordLoginFailure(loginIpBuckets, ipKey, nowMs);
+        recordLoginFailure(loginIdentifierBuckets, identifierKey, nowMs);
+        logLoginAuditEvent(req, "login_failed", normalizedIdentifier);
         return res.status(401).json({ ok: false, error: "Credenziali non valide" });
       }
 
       const valid = await bcrypt.compare(String(password), user.passwordHash);
       if (!valid) {
+        recordLoginFailure(loginIpBuckets, ipKey, nowMs);
+        recordLoginFailure(loginIdentifierBuckets, identifierKey, nowMs);
+        logLoginAuditEvent(req, "login_failed", normalizedIdentifier);
         return res.status(401).json({ ok: false, error: "Credenziali non valide" });
       }
 
-      const authUser: AuthUser = { id: user.id, role: user.role, technicianId: user.technicianId ?? null };
+      clearLoginFailureTracking(loginIpBuckets, ipKey);
+      clearLoginFailureTracking(loginIdentifierBuckets, identifierKey);
+      logLoginAuditEvent(req, "login_success", normalizedIdentifier);
+
+      const authUser: AuthUser = {
+        id: user.id,
+        role: user.role,
+        technicianId: user.technicianId ?? null,
+        organizationId: user.organizationId ?? null
+      };
       const accessToken = signAccessToken(authUser);
       const refreshToken = await createRefreshToken(user.id);
+      setRefreshTokenCookie(res, refreshToken);
 
       res.json({
         ok: true,
         accessToken,
-        refreshToken,
         user: {
           id: user.id,
           name: user.name,
           role: user.role,
-          technicianId: user.technicianId ?? null
+          technicianId: user.technicianId ?? null,
+          organizationId: user.organizationId ?? null
         }
       });
     } catch (error) {
@@ -1092,9 +1517,9 @@ async function startServer() {
     }
   });
 
-  app.post("/api/auth/refresh", async (req, res) => {
+  app.post("/api/auth/refresh", authRefreshLimiter, requireSensitiveUserAgent, requireJsonContentType, async (req, res) => {
     try {
-      const { refreshToken } = req.body || {};
+      const refreshToken = getRefreshTokenFromRequest(req);
       if (!refreshToken) {
         return res.status(400).json({ ok: false, error: "Refresh token mancante" });
       }
@@ -1106,9 +1531,11 @@ async function startServer() {
       });
 
       if (!stored || stored.revokedAt || stored.expiresAt < new Date()) {
+        clearRefreshTokenCookie(res);
         return res.status(401).json({ ok: false, error: "Refresh token non valido" });
       }
       if (!stored.user?.isActive) {
+        clearRefreshTokenCookie(res);
         return res.status(401).json({ ok: false, error: "Utente non attivo" });
       }
 
@@ -1121,10 +1548,12 @@ async function startServer() {
       const accessToken = signAccessToken({
         id: stored.userId,
         role: stored.user.role,
-        technicianId: stored.user.technicianId ?? null
+        technicianId: stored.user.technicianId ?? null,
+        organizationId: stored.user.organizationId ?? null
       });
+      setRefreshTokenCookie(res, newRefreshToken);
 
-      res.json({ ok: true, accessToken, refreshToken: newRefreshToken });
+      res.json({ ok: true, accessToken });
     } catch (error) {
       console.error(error);
       res.status(500).json({ ok: false, error: "Refresh fallito" });
@@ -1132,8 +1561,9 @@ async function startServer() {
   });
 
   app.post("/api/auth/logout", async (req, res) => {
+    const action = "logout";
     try {
-      const { refreshToken } = req.body || {};
+      const refreshToken = getRefreshTokenFromRequest(req);
       if (refreshToken) {
         const tokenHash = hashToken(String(refreshToken));
         await prisma.refreshToken.updateMany({
@@ -1141,8 +1571,11 @@ async function startServer() {
           data: { revokedAt: new Date() }
         });
       }
+      clearRefreshTokenCookie(res);
+      auditLog(req, action, {}, "success", { status: 200, hasRefreshToken: Boolean(refreshToken) });
       res.json({ ok: true });
     } catch (error) {
+      auditLog(req, action, {}, "error", { status: 500 });
       console.error(error);
       res.status(500).json({ ok: false, error: "Logout fallito" });
     }
@@ -1154,14 +1587,25 @@ async function startServer() {
       if (req.user.id === 0) {
         return res.json({ ok: true, user: req.user });
       }
-      const user = await prisma.user.findUnique({
-        where: { id: req.user.id },
-        select: { id: true, name: true, role: true, technicianId: true, isActive: true }
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
+      const user = await prisma.user.findFirst({
+        where: { id: req.user.id, organizationId },
+        select: { id: true, name: true, role: true, technicianId: true, organizationId: true, isActive: true }
       });
       if (!user || !user.isActive) {
         return res.status(401).json({ ok: false, error: "Non autorizzato" });
       }
-      res.json({ ok: true, user: { id: user.id, name: user.name, role: user.role, technicianId: user.technicianId ?? null } });
+      res.json({
+        ok: true,
+        user: {
+          id: user.id,
+          name: user.name,
+          role: user.role,
+          technicianId: user.technicianId ?? null,
+          organizationId: user.organizationId ?? null
+        }
+      });
     } catch (error) {
       console.error(error);
       res.status(500).json({ ok: false, error: "Failed to fetch user" });
@@ -1175,6 +1619,7 @@ async function startServer() {
     email: true,
     role: true,
     isActive: true,
+    organizationId: true,
     technicianId: true,
     createdAt: true,
     updatedAt: true
@@ -1186,7 +1631,10 @@ async function startServer() {
   // --- USERS (ADMIN) ---
   app.get("/api/users", allowAdmin, async (req, res) => {
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const users = await prisma.user.findMany({
+        where: { organizationId },
         orderBy: [{ createdAt: "asc" }, { id: "asc" }],
         select: userPublicSelect
       });
@@ -1198,14 +1646,19 @@ async function startServer() {
   });
 
   app.post("/api/users", allowAdmin, async (req, res) => {
+    const action = "create_user";
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const parsed = userCreateSchema.safeParse(req.body || {});
       if (!parsed.success) {
+        auditLog(req, action, {}, "error", { status: 400 });
         return sendError(res, 400, "Dati utente non validi", "VALIDATION_ERROR", { details: parsed.error.flatten() });
       }
 
       const username = normalizeUsername(parsed.data.username);
       if (!USERNAME_PATTERN.test(username)) {
+        auditLog(req, action, {}, "error", { status: 400 });
         return sendError(res, 400, "Username non valido", "INVALID_USERNAME");
       }
       const email = normalizeLoginEmail(parsed.data.email);
@@ -1213,6 +1666,7 @@ async function startServer() {
 
       const created = await prisma.user.create({
         data: {
+          organizationId,
           name: parsed.data.name?.trim() || username,
           username,
           email,
@@ -1223,6 +1677,7 @@ async function startServer() {
         select: userPublicSelect
       });
 
+      auditLog(req, action, { userId: created.id }, "success", { status: 201, role: created.role });
       return res.status(201).json(created);
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
@@ -1230,34 +1685,43 @@ async function startServer() {
           ? error.meta.target.map((value) => String(value).toLowerCase())
           : [];
         if (target.some((value) => value.includes("username"))) {
+          auditLog(req, action, {}, "conflict", { status: 409, field: "username" });
           return sendError(res, 409, "Username già in uso", "USERNAME_ALREADY_EXISTS");
         }
         if (target.some((value) => value.includes("email"))) {
+          auditLog(req, action, {}, "conflict", { status: 409, field: "email" });
           return sendError(res, 409, "Email già in uso", "EMAIL_ALREADY_EXISTS");
         }
       }
+      auditLog(req, action, {}, "error", { status: 500 });
       logApiError(req, error);
       return sendError(res, 500, "Errore creazione utente", "USER_CREATE_FAILED");
     }
   });
 
   app.patch("/api/users/:id", allowAdmin, async (req, res) => {
+    const action = "update_user";
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const userId = Number(req.params.id);
       if (!Number.isInteger(userId) || userId <= 0) {
+        auditLog(req, action, { userId: req.params.id || null }, "error", { status: 400 });
         return sendError(res, 400, "ID utente non valido", "INVALID_USER_ID");
       }
 
       const parsed = userPatchSchema.safeParse(req.body || {});
       if (!parsed.success) {
+        auditLog(req, action, { userId }, "error", { status: 400 });
         return sendError(res, 400, "Dati utente non validi", "VALIDATION_ERROR", { details: parsed.error.flatten() });
       }
 
-      const existing = await prisma.user.findUnique({
-        where: { id: userId },
+      const existing = await prisma.user.findFirst({
+        where: { id: userId, organizationId },
         select: { id: true, role: true, isActive: true }
       });
       if (!existing) {
+        auditLog(req, action, { userId }, "not_found", { status: 404 });
         return sendError(res, 404, "Utente non trovato", "USER_NOT_FOUND");
       }
 
@@ -1270,16 +1734,18 @@ async function startServer() {
         (isRoleDemotionFromAdmin || !nextIsActive);
 
       if (isRoleDemotionFromAdmin) {
-        const adminsCount = await prisma.user.count({ where: { role: Role.ADMIN } });
+        const adminsCount = await prisma.user.count({ where: { organizationId, role: Role.ADMIN } });
         if (adminsCount <= 1) {
+          auditLog(req, action, { userId }, "conflict", { status: 409 });
           return sendError(res, 409, LAST_ADMIN_BLOCK_MESSAGE, "LAST_ADMIN_REQUIRED");
         }
       }
       if (isRemovingActiveAdmin) {
         const activeAdminsCount = await prisma.user.count({
-          where: { role: Role.ADMIN, isActive: true }
+          where: { organizationId, role: Role.ADMIN, isActive: true }
         });
         if (activeAdminsCount <= 1) {
+          auditLog(req, action, { userId }, "conflict", { status: 409 });
           return sendError(res, 409, LAST_ACTIVE_ADMIN_BLOCK_MESSAGE, "LAST_ACTIVE_ADMIN_REQUIRED");
         }
       }
@@ -1288,6 +1754,7 @@ async function startServer() {
       if (parsed.data.username !== undefined) {
         const username = normalizeUsername(parsed.data.username);
         if (!USERNAME_PATTERN.test(username)) {
+          auditLog(req, action, { userId }, "error", { status: 400 });
           return sendError(res, 400, "Username non valido", "INVALID_USERNAME");
         }
         data.username = username;
@@ -1314,15 +1781,28 @@ async function startServer() {
         }
       }
       if (Object.keys(data).length === 0) {
+        auditLog(req, action, { userId }, "error", { status: 400 });
         return sendError(res, 400, "Nessuna modifica da applicare", "NO_UPDATES");
       }
 
-      const updated = await prisma.user.update({
-        where: { id: userId },
-        data,
+      const updatedCount = await prisma.user.updateMany({
+        where: { id: userId, organizationId },
+        data
+      });
+      if (updatedCount.count !== 1) {
+        auditLog(req, action, { userId }, "not_found", { status: 404 });
+        return sendError(res, 404, "Utente non trovato", "USER_NOT_FOUND");
+      }
+      const updated = await prisma.user.findFirst({
+        where: { id: userId, organizationId },
         select: userPublicSelect
       });
+      if (!updated) {
+        auditLog(req, action, { userId }, "not_found", { status: 404 });
+        return sendError(res, 404, "Utente non trovato", "USER_NOT_FOUND");
+      }
 
+      auditLog(req, action, { userId: updated.id }, "success", { status: 200 });
       return res.json(updated);
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
@@ -1330,50 +1810,66 @@ async function startServer() {
           ? error.meta.target.map((value) => String(value).toLowerCase())
           : [];
         if (target.some((value) => value.includes("username"))) {
+          auditLog(req, action, { userId: Number(req.params.id) || null }, "conflict", { status: 409, field: "username" });
           return sendError(res, 409, "Username già in uso", "USERNAME_ALREADY_EXISTS");
         }
         if (target.some((value) => value.includes("email"))) {
+          auditLog(req, action, { userId: Number(req.params.id) || null }, "conflict", { status: 409, field: "email" });
           return sendError(res, 409, "Email già in uso", "EMAIL_ALREADY_EXISTS");
         }
       }
+      auditLog(req, action, { userId: Number(req.params.id) || null }, "error", { status: 500 });
       logApiError(req, error);
       return sendError(res, 500, "Errore aggiornamento utente", "USER_UPDATE_FAILED");
     }
   });
 
   app.delete("/api/users/:id", allowAdmin, async (req, res) => {
+    const action = "delete_user";
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const userId = Number(req.params.id);
       if (!Number.isInteger(userId) || userId <= 0) {
+        auditLog(req, action, { userId: req.params.id || null }, "error", { status: 400 });
         return sendError(res, 400, "ID utente non valido", "INVALID_USER_ID");
       }
 
-      const existing = await prisma.user.findUnique({
-        where: { id: userId },
+      const existing = await prisma.user.findFirst({
+        where: { id: userId, organizationId },
         select: { id: true, role: true, isActive: true }
       });
       if (!existing) {
+        auditLog(req, action, { userId }, "not_found", { status: 404 });
         return sendError(res, 404, "Utente non trovato", "USER_NOT_FOUND");
       }
 
       if (existing.role === Role.ADMIN) {
-        const adminsCount = await prisma.user.count({ where: { role: Role.ADMIN } });
+        const adminsCount = await prisma.user.count({ where: { organizationId, role: Role.ADMIN } });
         if (adminsCount <= 1) {
+          auditLog(req, action, { userId }, "conflict", { status: 409 });
           return sendError(res, 409, LAST_ADMIN_BLOCK_MESSAGE, "LAST_ADMIN_REQUIRED");
         }
         if (existing.isActive) {
           const activeAdminsCount = await prisma.user.count({
-            where: { role: Role.ADMIN, isActive: true }
+            where: { organizationId, role: Role.ADMIN, isActive: true }
           });
           if (activeAdminsCount <= 1) {
+            auditLog(req, action, { userId }, "conflict", { status: 409 });
             return sendError(res, 409, LAST_ACTIVE_ADMIN_BLOCK_MESSAGE, "LAST_ACTIVE_ADMIN_REQUIRED");
           }
         }
       }
 
-      await prisma.user.delete({ where: { id: userId } });
+      const deleted = await prisma.user.deleteMany({ where: { id: userId, organizationId } });
+      if (deleted.count !== 1) {
+        auditLog(req, action, { userId }, "not_found", { status: 404 });
+        return sendError(res, 404, "Utente non trovato", "USER_NOT_FOUND");
+      }
+      auditLog(req, action, { userId }, "success", { status: 200 });
       return res.json({ ok: true });
     } catch (error) {
+      auditLog(req, action, { userId: Number(req.params.id) || null }, "error", { status: 500 });
       logApiError(req, error);
       return sendError(res, 500, "Errore eliminazione utente", "USER_DELETE_FAILED");
     }
@@ -1382,8 +1878,10 @@ async function startServer() {
   // GET /api/technicians
   app.get("/api/technicians", allowDispatcher, async (req, res) => {
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const technicians = await prisma.technician.findMany({
-        where: { isActive: true },
+        where: { organizationId, isActive: true },
       });
       res.json(technicians);
     } catch (error) {
@@ -1393,9 +1891,13 @@ async function startServer() {
 
   // POST /api/technicians
   app.post("/api/technicians", allowDispatcher, async (req, res) => {
+    const action = "create_technician";
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const parsed = technicianCreateSchema.safeParse(req.body || {});
       if (!parsed.success) {
+        auditLog(req, action, {}, "error", { status: 400 });
         return res.status(400).json({
           ok: false,
           error: "Dati impiegato non validi",
@@ -1405,6 +1907,7 @@ async function startServer() {
 
       const created = await prisma.technician.create({
         data: {
+          organizationId,
           name: parsed.data.name.trim(),
           email: parsed.data.email?.trim() || null,
           phone: parsed.data.phone?.trim() || null,
@@ -1414,14 +1917,17 @@ async function startServer() {
         }
       });
 
+      auditLog(req, action, { technicianId: created.id }, "success", { status: 201 });
       return res.status(201).json(created);
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
         const target = Array.isArray(error.meta?.target) ? error.meta.target : [];
         if (target.includes("email")) {
+          auditLog(req, action, {}, "conflict", { status: 409, field: "email" });
           return sendError(res, 409, "Email già in uso", "EMAIL_ALREADY_EXISTS");
         }
       }
+      auditLog(req, action, {}, "error", { status: 500 });
       logApiError(req, error);
       return sendError(res, 500, "Errore creazione impiegato", "TECHNICIAN_CREATE_FAILED");
     }
@@ -1429,15 +1935,31 @@ async function startServer() {
 
   // PATCH /api/technicians/:id
   app.patch("/api/technicians/:id", allowDispatcher, async (req, res) => {
+    const action = "update_technician";
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const id = Number(req.params.id);
       const { color } = req.body;
-      const technician = await prisma.technician.update({
-        where: { id },
+      const updatedCount = await prisma.technician.updateMany({
+        where: { id, organizationId },
         data: { color }
       });
+      if (updatedCount.count !== 1) {
+        auditLog(req, action, { technicianId: id }, "not_found", { status: 404 });
+        return res.status(404).json({ ok: false, error: "Technician not found" });
+      }
+      const technician = await prisma.technician.findFirst({
+        where: { id, organizationId }
+      });
+      if (!technician) {
+        auditLog(req, action, { technicianId: id }, "not_found", { status: 404 });
+        return res.status(404).json({ ok: false, error: "Technician not found" });
+      }
+      auditLog(req, action, { technicianId: technician.id }, "success", { status: 200 });
       res.json(technician);
     } catch (error) {
+      auditLog(req, action, { technicianId: Number(req.params.id) || null }, "error", { status: 500 });
       console.error(error);
       res.status(500).json({ ok: false, error: "Failed to update technician color" });
     }
@@ -1447,10 +1969,12 @@ async function startServer() {
 
   app.get('/api/teams', allowDispatcher, async (req, res) => {
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const [teams, technicians] = await Promise.all([
         readStoredTeams(),
         prisma.technician.findMany({
-          where: { isActive: true },
+          where: { organizationId, isActive: true },
           select: { id: true, name: true, color: true, isActive: true }
         })
       ]);
@@ -1477,6 +2001,8 @@ async function startServer() {
 
   app.post('/api/teams', allowDispatcher, async (req, res) => {
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const parsed = teamCreateSchema.safeParse(req.body);
       if (!parsed.success) {
         return res.status(400).json({ error: 'Dati squadra non validi', details: parsed.error.flatten() });
@@ -1485,7 +2011,7 @@ async function startServer() {
       const [teams, technicians] = await Promise.all([
         readStoredTeams(),
         prisma.technician.findMany({
-          where: { isActive: true },
+          where: { organizationId, isActive: true },
           select: { id: true, name: true, color: true, isActive: true }
         })
       ]);
@@ -1537,6 +2063,8 @@ async function startServer() {
 
   app.patch('/api/teams/:id', allowDispatcher, async (req, res) => {
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const teamId = Number(req.params.id);
       if (!Number.isInteger(teamId) || teamId <= 0) {
         return res.status(400).json({ error: 'ID squadra non valido' });
@@ -1550,7 +2078,7 @@ async function startServer() {
       const [teams, technicians] = await Promise.all([
         readStoredTeams(),
         prisma.technician.findMany({
-          where: { isActive: true },
+          where: { organizationId, isActive: true },
           select: { id: true, name: true, color: true, isActive: true }
         })
       ]);
@@ -1635,6 +2163,8 @@ async function startServer() {
 
   app.get('/api/stats/overview', allowDispatcher, async (req, res) => {
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const fromRaw = typeof req.query.from === 'string' ? req.query.from : undefined;
       const toRaw = typeof req.query.to === 'string' ? req.query.to : undefined;
       const teamIdsRaw = typeof req.query.teamIds === 'string' ? req.query.teamIds : '';
@@ -1662,6 +2192,7 @@ async function startServer() {
         readStoredTeams(),
         prisma.intervention.findMany({
           where: {
+            organizationId,
             OR: [
               {
                 AND: [
@@ -1701,6 +2232,7 @@ async function startServer() {
         }),
         prisma.intervention.count({
           where: {
+            organizationId,
             status: InterventionStatus.SCHEDULED,
             technicianId: null
           }
@@ -1889,6 +2421,8 @@ async function startServer() {
 
   app.get('/api/interventions', allowTech, async (req, res) => {
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const { from, to, technicianId, status } = req.query;
       const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
       const customerQuery = typeof req.query.customer === "string" ? req.query.customer.trim() : "";
@@ -1917,6 +2451,7 @@ async function startServer() {
         : undefined;
 
       const where: Prisma.InterventionWhereInput = {};
+      where.organizationId = organizationId;
       const andFilters: Prisma.InterventionWhereInput[] = [];
       const parseDateBoundary = (raw: string, endOfDay: boolean) => {
         const normalized = raw.trim();
@@ -2193,6 +2728,8 @@ async function startServer() {
   // GET /api/interventions/history-by-address
   app.get('/api/interventions/history-by-address', allowTech, async (req, res) => {
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const customerId = typeof req.query.customerId === "string" ? req.query.customerId.trim() : "";
       const addressKey = normalizeAddress(typeof req.query.addressKey === "string" ? req.query.addressKey : "");
       const rawLimit = Number(req.query.limit);
@@ -2207,6 +2744,7 @@ async function startServer() {
       }
 
       const whereClause: Prisma.InterventionWhereInput = {
+        organizationId,
         customerId,
         AND: coarseTokens.map((token) => ({
           address: { contains: token, mode: "insensitive" }
@@ -2285,8 +2823,10 @@ async function startServer() {
   // GET /api/interventions/:id
   app.get('/api/interventions/:id', allowTech, async (req, res) => {
     try {
-      const intervention = await prisma.intervention.findUnique({
-        where: { id: Number(req.params.id) },
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
+      const intervention = await prisma.intervention.findFirst({
+        where: { id: Number(req.params.id), organizationId },
         include: {
           technician: true,
           secondaryTechnician: true,
@@ -2309,11 +2849,14 @@ async function startServer() {
   // GET /api/interventions/:id/details (dettaglio esteso con allegati)
   app.get('/api/interventions/:id/details', allowTech, async (req, res) => {
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const id = Number(req.params.id);
-      const intervention = await prisma.intervention.findUnique({
-        where: { id },
+      const intervention = await prisma.intervention.findFirst({
+        where: { id, organizationId },
         select: {
           id: true,
+          organizationId: true,
           version: true,
           title: true,
           description: true,
@@ -2430,38 +2973,82 @@ async function startServer() {
 
   // POST /api/interventions
   app.post('/api/interventions', allowDispatcher, async (req, res) => {
+    const action = "create_intervention";
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const data = interventionSchema.parse(req.body);
       const { media, ...interventionData } = data;
       if (interventionData.status === InterventionStatus.COMPLETED) {
+        auditLog(req, action, {}, "error", { status: 400 });
         return res.status(400).json({ error: INTERVENTION_COMPLETION_BLOCKED_ERROR_MESSAGE });
+      }
+      if (interventionData.technicianId) {
+        const technicianExists = await prisma.technician.count({
+          where: { id: interventionData.technicianId, organizationId }
+        });
+        if (technicianExists === 0) {
+          auditLog(req, action, {}, "error", { status: 400 });
+          return res.status(400).json({ error: "Tecnico non valido" });
+        }
+      }
+      if (interventionData.secondaryTechnicianId) {
+        const secondaryTechnicianExists = await prisma.technician.count({
+          where: { id: interventionData.secondaryTechnicianId, organizationId }
+        });
+        if (secondaryTechnicianExists === 0) {
+          auditLog(req, action, {}, "error", { status: 400 });
+          return res.status(400).json({ error: "Tecnico di supporto non valido" });
+        }
+      }
+      if (interventionData.customerId) {
+        const customerExists = await prisma.customer.count({
+          where: { id: interventionData.customerId, organizationId }
+        });
+        if (customerExists === 0) {
+          auditLog(req, action, {}, "error", { status: 400 });
+          return res.status(400).json({ error: "Cliente non valido" });
+        }
+      }
+      if (interventionData.jobId) {
+        const jobExists = await prisma.job.count({
+          where: { id: interventionData.jobId, organizationId }
+        });
+        if (jobExists === 0) {
+          auditLog(req, action, {}, "error", { status: 400 });
+          return res.status(400).json({ error: "Commessa non valida" });
+        }
       }
 
       const intervention = await prisma.intervention.create({
         data: {
+          organizationId,
           ...interventionData,
           jobId: interventionData.jobId ?? null,
           startAt: interventionData.startAt ? new Date(interventionData.startAt) : null,
           endAt: interventionData.endAt ? new Date(interventionData.endAt) : null,
           media: media ? {
-            create: media
+            create: media.map((item) => ({ ...item, organizationId }))
           } : undefined
         },
         include: { technician: true, secondaryTechnician: true, customer: true, workReport: true }
       });
 
       if (intervention.technicianId) {
-        notifyTechnician(intervention.technicianId, "Nuovo Intervento Assegnato", `Ti è stato assegnato: ${intervention.title}`, `/technician`);
+        notifyTechnician(organizationId, intervention.technicianId, "Nuovo Intervento Assegnato", `Ti è stato assegnato: ${intervention.title}`, `/technician`);
       }
       if (intervention.secondaryTechnicianId) {
-        notifyTechnician(intervention.secondaryTechnicianId, "Nuovo Intervento Assegnato", `Sei stato assegnato come supporto: ${intervention.title}`, `/technician`);
+        notifyTechnician(organizationId, intervention.secondaryTechnicianId, "Nuovo Intervento Assegnato", `Sei stato assegnato come supporto: ${intervention.title}`, `/technician`);
       }
 
+      auditLog(req, action, { interventionId: intervention.id }, "success", { status: 201 });
       res.status(201).json(intervention);
     } catch (error) {
       if (error instanceof z.ZodError) {
+        auditLog(req, action, {}, "error", { status: 400 });
         return res.status(400).json({ errors: (error as any).errors || error.issues });
       }
+      auditLog(req, action, {}, "error", { status: 500 });
       console.error(error);
       res.status(500).json({ ok: false, error: 'Errore durante la creazione dell\'intervento' });
     }
@@ -2473,12 +3060,14 @@ async function startServer() {
     const action = "intervention.duplicate";
     const baseEntity = { interventionId: sourceId };
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const parsedBody = duplicateInterventionSchema.parse(req.body || {});
       const hasTechOverride = Object.prototype.hasOwnProperty.call(parsedBody, 'technicianId');
       const hasSecondaryTechOverride = Object.prototype.hasOwnProperty.call(parsedBody, 'secondaryTechnicianId');
 
-      const source = await prisma.intervention.findUnique({
-        where: { id: sourceId }
+      const source = await prisma.intervention.findFirst({
+        where: { id: sourceId, organizationId }
       });
 
       if (!source) {
@@ -2491,8 +3080,28 @@ async function startServer() {
         ? (parsedBody.secondaryTechnicianId ?? null)
         : (source.secondaryTechnicianId ?? null);
 
+      if (technicianId) {
+        const technicianExists = await prisma.technician.count({
+          where: { id: technicianId, organizationId }
+        });
+        if (technicianExists === 0) {
+          auditLog(req, action, baseEntity, "error", { status: 400 });
+          return res.status(400).json({ error: "Tecnico non valido" });
+        }
+      }
+      if (secondaryTechnicianId) {
+        const secondaryTechnicianExists = await prisma.technician.count({
+          where: { id: secondaryTechnicianId, organizationId }
+        });
+        if (secondaryTechnicianExists === 0) {
+          auditLog(req, action, baseEntity, "error", { status: 400 });
+          return res.status(400).json({ error: "Tecnico di supporto non valido" });
+        }
+      }
+
       const duplicated = await prisma.intervention.create({
         data: {
+          organizationId,
           title: source.title,
           description: source.description,
           address: source.address,
@@ -2552,10 +3161,10 @@ async function startServer() {
       });
 
       if (duplicated.technicianId) {
-        notifyTechnician(duplicated.technicianId, "Nuovo Intervento Assegnato", `Ti è stato assegnato: ${duplicated.title}`, `/technician`);
+        notifyTechnician(organizationId, duplicated.technicianId, "Nuovo Intervento Assegnato", `Ti è stato assegnato: ${duplicated.title}`, `/technician`);
       }
       if (duplicated.secondaryTechnicianId) {
-        notifyTechnician(duplicated.secondaryTechnicianId, "Nuovo Intervento Assegnato", `Sei stato assegnato come supporto: ${duplicated.title}`, `/technician`);
+        notifyTechnician(organizationId, duplicated.secondaryTechnicianId, "Nuovo Intervento Assegnato", `Sei stato assegnato come supporto: ${duplicated.title}`, `/technician`);
       }
 
       auditLog(
@@ -2581,18 +3190,20 @@ async function startServer() {
   app.post('/api/interventions/:id/attachments', allowDispatcher, attachmentUploadLimiter, handleMulterArray('files'), async (req, res) => {
     const uploadedFiles = (req.files as Express.Multer.File[] | undefined) ?? [];
     const interventionId = Number(req.params.id);
-    const action = "attachments.upload.intervention";
+    const action = "upload_attachment";
     const totalBytes = uploadedFiles.reduce((acc, file) => acc + (file.size || 0), 0);
     const baseEntity = { interventionId: Number.isFinite(interventionId) ? interventionId : null };
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       if (!Number.isFinite(interventionId)) {
         for (const file of uploadedFiles) await safeUnlinkFile(file.path);
         auditLog(req, action, baseEntity, "error", { status: 400, count: uploadedFiles.length });
         return res.status(400).json({ error: "ID intervento non valido" });
       }
 
-      const intervention = await prisma.intervention.findUnique({
-        where: { id: interventionId },
+      const intervention = await prisma.intervention.findFirst({
+        where: { id: interventionId, organizationId },
         select: { id: true }
       });
       if (!intervention) {
@@ -2611,6 +3222,7 @@ async function startServer() {
         for (const file of uploadedFiles) {
           const row = await tx.interventionAttachment.create({
             data: {
+              organizationId,
               interventionId,
               kind: attachmentKindFromMime(file.mimetype || ""),
               mimeType: file.mimetype || "application/octet-stream",
@@ -2650,12 +3262,14 @@ async function startServer() {
   // PATCH /api/interventions/:id
   app.patch("/api/interventions/:id", allowTech, async (req, res) => {
     const id = Number(req.params.id);
-    const action = "intervention.update";
+    const action = "update_intervention";
     const baseEntity = { interventionId: id };
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const { version, ...updateData } = UpdateInterventionSchema.parse(req.body);
 
-      const current = await prisma.intervention.findUnique({ where: { id } });
+      const current = await prisma.intervention.findFirst({ where: { id, organizationId } });
       if (!current) {
         auditLog(req, action, baseEntity, "not_found", { status: 404 });
         return res.status(404).json({ error: "Intervento non trovato" });
@@ -2687,7 +3301,8 @@ async function startServer() {
       if (updateData.status === InterventionStatus.COMPLETED && current.status !== InterventionStatus.COMPLETED) {
         const completion = await getInterventionCompletionEligibility({
           tx: prisma,
-          interventionId: id
+          interventionId: id,
+          organizationId
         });
         if (!completion.eligible) {
           auditLog(req, action, baseEntity, "error", { status: 400 });
@@ -2734,6 +3349,43 @@ async function startServer() {
         }
       }
 
+      if (updateData.technicianId !== undefined && updateData.technicianId !== null) {
+        const technicianExists = await prisma.technician.count({
+          where: { id: updateData.technicianId, organizationId }
+        });
+        if (technicianExists === 0) {
+          auditLog(req, action, baseEntity, "error", { status: 400 });
+          return res.status(400).json({ error: "Tecnico non valido" });
+        }
+      }
+      if (updateData.secondaryTechnicianId !== undefined && updateData.secondaryTechnicianId !== null) {
+        const secondaryTechnicianExists = await prisma.technician.count({
+          where: { id: updateData.secondaryTechnicianId, organizationId }
+        });
+        if (secondaryTechnicianExists === 0) {
+          auditLog(req, action, baseEntity, "error", { status: 400 });
+          return res.status(400).json({ error: "Tecnico di supporto non valido" });
+        }
+      }
+      if (updateData.customerId !== undefined && updateData.customerId !== null) {
+        const customerExists = await prisma.customer.count({
+          where: { id: updateData.customerId, organizationId }
+        });
+        if (customerExists === 0) {
+          auditLog(req, action, baseEntity, "error", { status: 400 });
+          return res.status(400).json({ error: "Cliente non valido" });
+        }
+      }
+      if (updateData.jobId !== undefined && updateData.jobId !== null) {
+        const jobExists = await prisma.job.count({
+          where: { id: updateData.jobId, organizationId }
+        });
+        if (jobExists === 0) {
+          auditLog(req, action, baseEntity, "error", { status: 400 });
+          return res.status(400).json({ error: "Commessa non valida" });
+        }
+      }
+
       const safeUpdateData: any = {
         title: updateData.title,
         description: updateData.description,
@@ -2747,8 +3399,8 @@ async function startServer() {
       };
       Object.keys(safeUpdateData).forEach(key => safeUpdateData[key] === undefined && delete safeUpdateData[key]);
 
-      let updatedIntervention = await prisma.intervention.update({
-        where: { id: Number(req.params.id) },
+      const updatedCount = await prisma.intervention.updateMany({
+        where: { id: Number(req.params.id), organizationId },
         data: {
           ...safeUpdateData,
           version: { increment: 1 },
@@ -2757,18 +3409,30 @@ async function startServer() {
           ...(req.body.media && Array.isArray(req.body.media) ? {
             media: {
               create: req.body.media.map((m: any) => ({
+                organizationId,
                 url: m.url,
                 type: m.type
               }))
             }
           } : {})
-        },
+        }
+      });
+      if (updatedCount.count !== 1) {
+        auditLog(req, action, baseEntity, "conflict", { status: 409 });
+        return res.status(409).json({ error: "Intervento modificato da altro utente" });
+      }
+      let updatedIntervention = await prisma.intervention.findFirst({
+        where: { id: Number(req.params.id), organizationId },
         include: { technician: true, secondaryTechnician: true, customer: true, workReport: true }
       });
+      if (!updatedIntervention) {
+        auditLog(req, action, baseEntity, "not_found", { status: 404 });
+        return res.status(404).json({ error: "Intervento non trovato" });
+      }
 
       if (updateData.status === InterventionStatus.COMPLETED) {
         const finalizedReport = await prisma.$transaction(async (tx) => {
-          const currentReport = await getOrCreateWorkReport(tx, id);
+          const currentReport = await getOrCreateWorkReport(tx, id, organizationId);
           const timingPatch = getAutomaticTimingPatch({
             report: currentReport,
             interventionStartAt: updatedIntervention.startAt,
@@ -2780,13 +3444,23 @@ async function startServer() {
             return currentReport;
           }
 
-          return tx.workReport.update({
-            where: { interventionId: id },
+          const updatedCount = await tx.workReport.updateMany({
+            where: { interventionId: id, organizationId },
             data: {
               ...timingPatch,
               version: { increment: 1 }
             }
           });
+          if (updatedCount.count !== 1) {
+            throw new Error("Work report not found");
+          }
+          const updated = await tx.workReport.findFirst({
+            where: { interventionId: id, organizationId }
+          });
+          if (!updated) {
+            throw new Error("Work report not found");
+          }
+          return updated;
         });
 
         updatedIntervention = {
@@ -2798,19 +3472,19 @@ async function startServer() {
       // Notifications for assignment changes
       if (updateData.technicianId !== undefined && updateData.technicianId !== current.technicianId) {
         if (updateData.technicianId) {
-          notifyTechnician(updateData.technicianId, "Intervento Assegnato", `Ti è stato assegnato: ${updatedIntervention.title}`, `/technician`);
+          notifyTechnician(organizationId, updateData.technicianId, "Intervento Assegnato", `Ti è stato assegnato: ${updatedIntervention.title}`, `/technician`);
         }
         if (current.technicianId) {
-          notifyTechnician(current.technicianId, "Intervento Rimosso", `L'intervento ${current.title} è stato riassegnato.`, `/technician`);
+          notifyTechnician(organizationId, current.technicianId, "Intervento Rimosso", `L'intervento ${current.title} è stato riassegnato.`, `/technician`);
         }
       }
 
       if (updateData.secondaryTechnicianId !== undefined && updateData.secondaryTechnicianId !== current.secondaryTechnicianId) {
         if (updateData.secondaryTechnicianId) {
-          notifyTechnician(updateData.secondaryTechnicianId, "Intervento Assegnato", `Sei stato assegnato come supporto: ${updatedIntervention.title}`, `/technician`);
+          notifyTechnician(organizationId, updateData.secondaryTechnicianId, "Intervento Assegnato", `Sei stato assegnato come supporto: ${updatedIntervention.title}`, `/technician`);
         }
         if (current.secondaryTechnicianId) {
-          notifyTechnician(current.secondaryTechnicianId, "Intervento Rimosso", `Non sei più assegnato a: ${current.title}`, `/technician`);
+          notifyTechnician(organizationId, current.secondaryTechnicianId, "Intervento Rimosso", `Non sei più assegnato a: ${current.title}`, `/technician`);
         }
       }
 
@@ -2829,22 +3503,36 @@ async function startServer() {
 
   // DELETE /api/interventions/:id
   app.delete("/api/interventions/:id", allowDispatcher, async (req, res) => {
+    const action = "delete_intervention";
     try {
-      const current = await prisma.intervention.findUnique({ where: { id: Number(req.params.id) } });
-      await prisma.intervention.delete({
-        where: { id: Number(req.params.id) }
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
+      const interventionId = Number(req.params.id);
+      const current = await prisma.intervention.findFirst({ where: { id: interventionId, organizationId } });
+      if (!current) {
+        auditLog(req, action, { interventionId }, "not_found", { status: 404 });
+        return res.status(404).json({ error: "Intervento non trovato" });
+      }
+      const deleted = await prisma.intervention.deleteMany({
+        where: { id: interventionId, organizationId }
       });
+      if (deleted.count !== 1) {
+        auditLog(req, action, { interventionId }, "not_found", { status: 404 });
+        return res.status(404).json({ error: "Intervento non trovato" });
+      }
 
       if (current?.technicianId) {
-        notifyTechnician(current.technicianId, "Intervento Annullato", `L'intervento ${current.title} è stato annullato dal calendario.`, `/technician`);
+        notifyTechnician(organizationId, current.technicianId, "Intervento Annullato", `L'intervento ${current.title} è stato annullato dal calendario.`, `/technician`);
       }
 
       if (current?.secondaryTechnicianId) {
-        notifyTechnician(current.secondaryTechnicianId, "Intervento Annullato", `L'intervento ${current.title} è stato annullato dal calendario.`, `/technician`);
+        notifyTechnician(organizationId, current.secondaryTechnicianId, "Intervento Annullato", `L'intervento ${current.title} è stato annullato dal calendario.`, `/technician`);
       }
 
+      auditLog(req, action, { interventionId }, "success", { status: 204 });
       res.status(204).send();
     } catch (error) {
+      auditLog(req, action, { interventionId: Number(req.params.id) || null }, "error", { status: 500 });
       console.error(error);
       res.status(500).json({ ok: false, error: "Failed to delete intervention" });
     }
@@ -2853,30 +3541,62 @@ async function startServer() {
   // POST /api/push/subscribe (NEW)
   app.post("/api/push/subscribe", allowTech, async (req, res) => {
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const { endpoint, keys, technicianId, role } = req.body;
       if (!endpoint || !keys || !keys.p256dh || !keys.auth) {
         return res.status(400).json({ error: "Invalid subscription" });
       }
-
-      // Upsert subscriptio
-      const sub = await prisma.pushSubscription.upsert({
-        where: { endpoint },
-        update: {
-          technicianId: technicianId ? Number(technicianId) : null,
-          p256dh: keys.p256dh,
-          auth: keys.auth,
-          role: role || "TECHNICIAN"
-        },
-        create: {
-          endpoint,
-          p256dh: keys.p256dh,
-          auth: keys.auth,
-          technicianId: technicianId ? Number(technicianId) : null,
-          role: role || "TECHNICIAN"
+      const parsedTechnicianId = technicianId ? Number(technicianId) : null;
+      if (parsedTechnicianId) {
+        const technicianExists = await prisma.technician.count({
+          where: { id: parsedTechnicianId, organizationId }
+        });
+        if (technicianExists === 0) {
+          return res.status(400).json({ error: "Technician not found" });
         }
+      }
+      const existingSub = await prisma.pushSubscription.findFirst({
+        where: { endpoint, organizationId },
+        select: { id: true }
       });
+      const sub = existingSub
+        ? await prisma.$transaction(async (tx) => {
+            const updatedCount = await tx.pushSubscription.updateMany({
+              where: { id: existingSub.id, organizationId },
+              data: {
+                technicianId: parsedTechnicianId,
+                p256dh: keys.p256dh,
+                auth: keys.auth,
+                role: role || "TECHNICIAN"
+              }
+            });
+            if (updatedCount.count !== 1) {
+              throw new Error("Push subscription not found");
+            }
+            const updatedSub = await tx.pushSubscription.findFirst({
+              where: { id: existingSub.id, organizationId }
+            });
+            if (!updatedSub) {
+              throw new Error("Push subscription not found");
+            }
+            return updatedSub;
+          })
+        : await prisma.pushSubscription.create({
+            data: {
+              organizationId,
+              endpoint,
+              p256dh: keys.p256dh,
+              auth: keys.auth,
+              technicianId: parsedTechnicianId,
+              role: role || "TECHNICIAN"
+            }
+          });
       res.json(sub);
     } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+        return res.status(409).json({ error: "Subscription già registrata" });
+      }
       console.error(err);
       res.status(500).json({ ok: false, error: "Push subscribe fail" });
     }
@@ -2887,10 +3607,12 @@ async function startServer() {
   // GET /api/interventions/:id/work-report (Ottieni o crea bozza)
   app.get("/api/interventions/:id/work-report", allowTech, async (req, res) => {
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const interventionId = Number(req.params.id);
-      const intervention = await prisma.intervention.findUnique({
-        where: { id: interventionId },
-        select: { id: true, technicianId: true, secondaryTechnicianId: true }
+      const intervention = await prisma.intervention.findFirst({
+        where: { id: interventionId, organizationId },
+        select: { id: true, organizationId: true, technicianId: true, secondaryTechnicianId: true }
       });
       if (!intervention) {
         return res.status(404).json({ error: "Intervento non trovato" });
@@ -2898,18 +3620,22 @@ async function startServer() {
       if (!userCanAccessIntervention(req.user, intervention)) {
         return res.status(403).json({ ok: false, error: "Non autorizzato" });
       }
-      let report = await prisma.workReport.findUnique({ where: { interventionId } });
+      let report = await prisma.workReport.findFirst({ where: { interventionId, organizationId } });
 
       if (!report) {
         let retries = 2;
         while (retries >= 0) {
           try {
             report = await prisma.$transaction(async (tx) => {
-              const max = await tx.workReport.aggregate({ _max: { reportNumber: true } });
+              const max = await tx.workReport.aggregate({
+                where: { organizationId },
+                _max: { reportNumber: true }
+              });
               const next = (max._max.reportNumber ?? -1) + 1;
 
               return await tx.workReport.create({
                 data: {
+                  organizationId,
                   interventionId,
                   reportNumber: next
                 }
@@ -2935,10 +3661,12 @@ async function startServer() {
   // PATCH /api/interventions/:id/work-report (Aggiorna testi e cliente)
   app.patch("/api/interventions/:id/work-report", allowTech, async (req, res) => {
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const interventionId = Number(req.params.id);
-      const intervention = await prisma.intervention.findUnique({
-        where: { id: interventionId },
-        select: { id: true, technicianId: true, secondaryTechnicianId: true, startAt: true }
+      const intervention = await prisma.intervention.findFirst({
+        where: { id: interventionId, organizationId },
+        select: { id: true, organizationId: true, technicianId: true, secondaryTechnicianId: true, startAt: true }
       });
       if (!intervention) {
         return res.status(404).json({ error: "Intervento non trovato" });
@@ -2960,7 +3688,7 @@ async function startServer() {
       }
 
       const report = await prisma.$transaction(async (tx) => {
-        const currentReport = await getOrCreateWorkReport(tx, interventionId);
+        const currentReport = await getOrCreateWorkReport(tx, interventionId, organizationId);
         const patchData: Record<string, unknown> = { ...data };
         if (!currentReport.actualStartAt) {
           const autoStartAt = getAutomaticWorkReportStartAt(intervention.startAt, new Date());
@@ -2979,12 +3707,16 @@ async function startServer() {
 
         const completion = await getInterventionCompletionEligibility({
           tx,
-          interventionId
+          interventionId,
+          organizationId,
+          workReportId: updatedReport.id,
+          workPerformed: (updatedReport as any).workPerformed
         });
         if (completion.eligible) {
           await tx.intervention.updateMany({
             where: {
               id: interventionId,
+              organizationId,
               status: {
                 notIn: [
                   InterventionStatus.COMPLETED,
@@ -3020,23 +3752,27 @@ async function startServer() {
   app.post("/api/work-reports/:id/attachments", allowTech, attachmentUploadLimiter, handleMulterArray('files'), async (req, res) => {
     const uploadedFiles = (req.files as Express.Multer.File[] | undefined) ?? [];
     const workReportId = String(req.params.id || "");
-    const action = "attachments.upload.workReport";
+    const action = "upload_attachment";
     const totalBytes = uploadedFiles.reduce((acc, file) => acc + (file.size || 0), 0);
     let auditedEntity: AuditEntity = { workReportId: workReportId || null };
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       if (!workReportId) {
         for (const file of uploadedFiles) await safeUnlinkFile(file.path);
         auditLog(req, action, auditedEntity, "error", { status: 400, count: uploadedFiles.length });
         return res.status(400).json({ error: "ID bolla non valido" });
       }
 
-      const workReport = await prisma.workReport.findUnique({
-        where: { id: workReportId },
+      const workReport = await prisma.workReport.findFirst({
+        where: { id: workReportId, organizationId },
         select: {
           id: true,
+          workPerformed: true,
           intervention: {
             select: {
               id: true,
+              organizationId: true,
               technicianId: true,
               secondaryTechnicianId: true
             }
@@ -3067,6 +3803,7 @@ async function startServer() {
         for (const file of uploadedFiles) {
           const row = await tx.workReportAttachment.create({
             data: {
+              organizationId,
               workReportId: workReport.id,
               kind: attachmentKindFromMime(file.mimetype || ""),
               mimeType: file.mimetype || "application/octet-stream",
@@ -3088,12 +3825,16 @@ async function startServer() {
 
         const completion = await getInterventionCompletionEligibility({
           tx,
-          interventionId: workReport.intervention.id
+          interventionId: workReport.intervention.id,
+          organizationId,
+          workReportId: workReport.id,
+          workPerformed: workReport.workPerformed
         });
         if (completion.eligible) {
           await tx.intervention.updateMany({
             where: {
               id: workReport.intervention.id,
+              organizationId,
               status: {
                 notIn: [
                   InterventionStatus.COMPLETED,
@@ -3133,13 +3874,15 @@ async function startServer() {
     const action = "workReport.start";
     const baseEntity = { interventionId: Number.isFinite(interventionId) ? interventionId : null };
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const now = new Date();
       let outcome: AuditOutcome = "success";
 
       const report = await prisma.$transaction(async (tx) => {
-        const intervention = await tx.intervention.findUnique({
-          where: { id: interventionId },
-          select: { id: true, status: true, technicianId: true, secondaryTechnicianId: true }
+        const intervention = await tx.intervention.findFirst({
+          where: { id: interventionId, organizationId },
+          select: { id: true, organizationId: true, status: true, technicianId: true, secondaryTechnicianId: true }
         });
         if (!intervention) {
           throw { status: 404, message: "Intervento non trovato" };
@@ -3148,7 +3891,7 @@ async function startServer() {
           throw { status: 403, message: "Non autorizzato" };
         }
 
-        const currentReport = await getOrCreateWorkReport(tx, interventionId);
+        const currentReport = await getOrCreateWorkReport(tx, interventionId, organizationId);
 
         if (currentReport.actualStartAt) {
           outcome = "noop";
@@ -3162,6 +3905,7 @@ async function startServer() {
         const result = await tx.workReport.updateMany({
           where: {
             interventionId,
+            organizationId,
             version: currentReport.version,
             actualStartAt: null,
             actualEndAt: null
@@ -3177,7 +3921,7 @@ async function startServer() {
         });
 
         if (result.count !== 1) {
-          const latest = await tx.workReport.findUnique({ where: { interventionId } });
+          const latest = await tx.workReport.findFirst({ where: { interventionId, organizationId } });
           if (!latest) throw { status: 404, message: "Work report not found" };
           if (latest.actualStartAt) {
             outcome = "noop";
@@ -3186,11 +3930,11 @@ async function startServer() {
           throw { status: 409, message: WORK_REPORT_TIMING_CONFLICT_MESSAGE };
         }
 
-        const updated = await tx.workReport.findUnique({ where: { interventionId } });
+        const updated = await tx.workReport.findFirst({ where: { interventionId, organizationId } });
         if (!updated) throw { status: 404, message: "Work report not found" };
 
-        await tx.intervention.update({
-          where: { id: interventionId },
+        await tx.intervention.updateMany({
+          where: { id: interventionId, organizationId },
           data: {
             status: InterventionStatus.IN_PROGRESS,
             version: { increment: 1 }
@@ -3219,19 +3963,22 @@ async function startServer() {
     const action = "workReport.pauseStart";
     const baseEntity = { interventionId: Number.isFinite(interventionId) ? interventionId : null };
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const now = new Date();
       let outcome: AuditOutcome = "success";
       const report = await prisma.$transaction(async (tx) => {
-        const intervention = await tx.intervention.findUnique({
-          where: { id: interventionId },
-          select: { id: true, technicianId: true, secondaryTechnicianId: true }
+        const intervention = await tx.intervention.findFirst({
+          where: { id: interventionId, organizationId },
+          select: { id: true, organizationId: true, technicianId: true, secondaryTechnicianId: true }
         });
         if (!intervention) throw { status: 404, message: "Intervento non trovato" };
         if (!userCanAccessIntervention(req.user, intervention)) throw { status: 403, message: "Non autorizzato" };
-        const before = await getOrCreateWorkReport(tx, interventionId);
+        const before = await getOrCreateWorkReport(tx, interventionId, organizationId);
         const after = await pauseStartWorkReportInTransaction({
           tx,
           interventionId,
+          organizationId,
           now
         });
         if ((after as any)?.version === before.version) {
@@ -3258,19 +4005,22 @@ async function startServer() {
     const action = "workReport.pauseStop";
     const baseEntity = { interventionId: Number.isFinite(interventionId) ? interventionId : null };
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const now = new Date();
       let outcome: AuditOutcome = "success";
       const report = await prisma.$transaction(async (tx) => {
-        const intervention = await tx.intervention.findUnique({
-          where: { id: interventionId },
-          select: { id: true, technicianId: true, secondaryTechnicianId: true }
+        const intervention = await tx.intervention.findFirst({
+          where: { id: interventionId, organizationId },
+          select: { id: true, organizationId: true, technicianId: true, secondaryTechnicianId: true }
         });
         if (!intervention) throw { status: 404, message: "Intervento non trovato" };
         if (!userCanAccessIntervention(req.user, intervention)) throw { status: 403, message: "Non autorizzato" };
-        const before = await getOrCreateWorkReport(tx, interventionId);
+        const before = await getOrCreateWorkReport(tx, interventionId, organizationId);
         const after = await pauseStopWorkReportInTransaction({
           tx,
           interventionId,
+          organizationId,
           now
         });
         if ((after as any)?.version === before.version) {
@@ -3297,21 +4047,24 @@ async function startServer() {
     const action = "workReport.stop";
     const baseEntity = { interventionId: Number.isFinite(interventionId) ? interventionId : null };
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const { notes } = req.body || {};
       const now = new Date();
       let outcome: AuditOutcome = "success";
 
       const report = await prisma.$transaction(async (tx) => {
-        const intervention = await tx.intervention.findUnique({
-          where: { id: interventionId },
-          select: { id: true, technicianId: true, secondaryTechnicianId: true }
+        const intervention = await tx.intervention.findFirst({
+          where: { id: interventionId, organizationId },
+          select: { id: true, organizationId: true, technicianId: true, secondaryTechnicianId: true }
         });
         if (!intervention) throw { status: 404, message: "Intervento non trovato" };
         if (!userCanAccessIntervention(req.user, intervention)) throw { status: 403, message: "Non autorizzato" };
-        const before = await getOrCreateWorkReport(tx, interventionId);
+        const before = await getOrCreateWorkReport(tx, interventionId, organizationId);
         const after = await stopWorkReportInTransaction({
           tx,
           interventionId,
+          organizationId,
           now,
           notes
         });
@@ -3340,9 +4093,11 @@ async function startServer() {
     const action = "workReport.sign.generateLink";
     const baseEntity = { interventionId: Number.isFinite(interventionId) ? interventionId : null };
     try {
-      const intervention = await prisma.intervention.findUnique({
-        where: { id: interventionId },
-        select: { id: true, technicianId: true, secondaryTechnicianId: true }
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
+      const intervention = await prisma.intervention.findFirst({
+        where: { id: interventionId, organizationId },
+        select: { id: true, organizationId: true, technicianId: true, secondaryTechnicianId: true }
       });
       if (!intervention) {
         return res.status(404).json({ error: "Intervento non trovato" });
@@ -3353,18 +4108,29 @@ async function startServer() {
 
       const token = uuidv4();
 
-      let report = await prisma.workReport.findUnique({ where: { interventionId } });
+      let report = await prisma.workReport.findFirst({ where: { interventionId, organizationId } });
       if (report) {
-        report = await prisma.workReport.update({
-          where: { interventionId },
+        const updatedCount = await prisma.workReport.updateMany({
+          where: { interventionId, organizationId },
           data: { signatureToken: token, signatureRequestedAt: new Date() }
         });
+        if (updatedCount.count !== 1) {
+          throw new Error("Failed to update work report");
+        }
+        report = await prisma.workReport.findFirst({ where: { interventionId, organizationId } });
+        if (!report) {
+          throw new Error("Work report not found");
+        }
       } else {
         report = await prisma.$transaction(async (tx) => {
-          const max = await tx.workReport.aggregate({ _max: { reportNumber: true } });
+          const max = await tx.workReport.aggregate({
+            where: { organizationId },
+            _max: { reportNumber: true }
+          });
           const next = (max._max.reportNumber ?? -1) + 1;
           return await tx.workReport.create({
             data: {
+              organizationId,
               interventionId,
               reportNumber: next,
               signatureToken: token,
@@ -3385,7 +4151,7 @@ async function startServer() {
   });
 
   // GET /api/public/sign/:token (Per la pagina pubblica)
-  app.get("/api/public/sign/:token", publicSignGetLimiter, async (req, res) => {
+  app.get("/api/public/sign/:token", publicSignGetLimiter, requireSensitiveUserAgent, async (req, res) => {
     const action = "workReport.sign.public.get";
     try {
       const { token } = req.params;
@@ -3416,15 +4182,15 @@ async function startServer() {
   });
 
   // POST /api/public/sign/:token (Salvataggio firma)
-  app.post("/api/public/sign/:token", publicSignPostLimiter, async (req, res) => {
-    const action = "workReport.sign.public.submit";
+  app.post("/api/public/sign/:token", publicSignPostLimiter, requireSensitiveUserAgent, requireJsonContentType, async (req, res) => {
+    const action = "sign_work_report";
     let auditedEntity: AuditEntity = {};
     try {
       const { token } = req.params;
       const { signatureDataUrl, customerName } = req.body;
       const preReport = await prisma.workReport.findUnique({
         where: { signatureToken: token },
-        select: { id: true, interventionId: true }
+        select: { id: true, interventionId: true, organizationId: true }
       });
       if (preReport) {
         auditedEntity = { interventionId: preReport.interventionId, workReportId: preReport.id };
@@ -3475,10 +4241,11 @@ async function startServer() {
           return;
         }
 
-        const signedReport = await tx.workReport.findUnique({
-          where: { id: preReport.id },
+        const signedReport = await tx.workReport.findFirst({
+          where: { id: preReport.id, organizationId: preReport.organizationId },
           select: {
             id: true,
+            organizationId: true,
             interventionId: true,
             actualStartAt: true,
             actualEndAt: true,
@@ -3503,13 +4270,16 @@ async function startServer() {
           return;
         }
 
-        await tx.workReport.update({
-          where: { id: signedReport.id },
+        const updatedCount = await tx.workReport.updateMany({
+          where: { id: signedReport.id, organizationId: signedReport.organizationId },
           data: {
             ...timingPatch,
             version: { increment: 1 }
           }
         });
+        if (updatedCount.count !== 1) {
+          throw new Error("Failed to update signed work report");
+        }
       });
 
       auditLog(req, action, auditedEntity, "success", { status: 200 });
@@ -3528,12 +4298,14 @@ async function startServer() {
   // POST /api/interventions/:id/work-report/send-email
   app.post("/api/interventions/:id/work-report/send-email", allowTech, async (req, res) => {
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       if (!WORK_REPORT_EMAIL_ENABLED) {
         return res.status(501).json({ error: "Invio email disabilitato in questa fase" });
       }
       const interventionId = Number(req.params.id);
-      const report = await prisma.workReport.findUnique({
-        where: { interventionId },
+      const report = await prisma.workReport.findFirst({
+        where: { interventionId, organizationId },
         include: { intervention: { include: { technician: true } } }
       });
 
@@ -3620,10 +4392,19 @@ async function startServer() {
         console.log("Anteprima payload email:", info.messageId);
       }
 
-      const updatedReport = await prisma.workReport.update({
-        where: { interventionId },
+      const updatedReportCount = await prisma.workReport.updateMany({
+        where: { interventionId, organizationId },
         data: { emailedAt: new Date() }
       });
+      if (updatedReportCount.count !== 1) {
+        return res.status(404).json({ error: "Bolla non trovata" });
+      }
+      const updatedReport = await prisma.workReport.findFirst({
+        where: { interventionId, organizationId }
+      });
+      if (!updatedReport) {
+        return res.status(404).json({ error: "Bolla non trovata" });
+      }
 
       res.json({ success: true, report: updatedReport });
     } catch (error) {
@@ -3638,11 +4419,13 @@ async function startServer() {
     const action = "attachments.download";
     let auditedEntity: AuditEntity = { attachmentId: attachmentId || null };
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       if (!attachmentId) {
         auditLog(req, action, auditedEntity, "error", { status: 400 });
         return res.status(400).json({ error: "ID allegato non valido" });
       }
-      const resolvedAttachment = await resolveAttachmentForDownload(attachmentId);
+      const resolvedAttachment = await resolveAttachmentForDownload(attachmentId, organizationId);
       if (!resolvedAttachment) {
         auditLog(req, action, auditedEntity, "not_found", { status: 404 });
         return res.status(404).json({ error: "Allegato non trovato" });
@@ -3679,14 +4462,18 @@ async function startServer() {
   app.get("/api/attachments/health", allowDispatcher, async (req, res) => {
     const action = "attachments.health";
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const dbTake = Math.max(1, Math.ceil((ATTACHMENTS_HEALTH_SCAN_LIMIT + 1) / 2));
       const [interventionRows, workReportRows] = await Promise.all([
         prisma.interventionAttachment.findMany({
+          where: { organizationId },
           orderBy: { createdAt: "desc" },
           take: dbTake,
           select: { storedName: true }
         }),
         prisma.workReportAttachment.findMany({
+          where: { organizationId },
           orderBy: { createdAt: "desc" },
           take: dbTake,
           select: { storedName: true }
@@ -3716,13 +4503,13 @@ async function startServer() {
       const [fsInterventionRefs, fsWorkReportRefs] = await Promise.all([
         safeFsNames.length
           ? prisma.interventionAttachment.findMany({
-              where: { storedName: { in: safeFsNames } },
+              where: { organizationId, storedName: { in: safeFsNames } },
               select: { storedName: true }
             })
           : Promise.resolve([] as Array<{ storedName: string }>),
         safeFsNames.length
           ? prisma.workReportAttachment.findMany({
-              where: { storedName: { in: safeFsNames } },
+              where: { organizationId, storedName: { in: safeFsNames } },
               select: { storedName: true }
             })
           : Promise.resolve([] as Array<{ storedName: string }>)
@@ -3767,12 +4554,32 @@ async function startServer() {
 
   // POST /api/attachments/cleanup (admin/dispatcher)
   app.post("/api/attachments/cleanup", allowDispatcher, async (req, res) => {
-    const action = "attachments.cleanup";
+    const action = "delete_attachment";
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const minAgeDays = ATTACHMENTS_CLEANUP_MIN_AGE_DAYS;
       const cutoffMs = Date.now() - minAgeDays * 24 * 60 * 60 * 1000;
       const { names: fsNames, isPartial } = await listUploadFilesBounded(ATTACHMENTS_CLEANUP_SCAN_LIMIT);
       const safeFsNames = fsNames.map((name) => path.basename(name));
+      const [orgInterventionFsRefs, orgWorkReportFsRefs] = await Promise.all([
+        safeFsNames.length
+          ? prisma.interventionAttachment.findMany({
+              where: { organizationId, storedName: { in: safeFsNames } },
+              select: { storedName: true }
+            })
+          : Promise.resolve([] as Array<{ storedName: string }>),
+        safeFsNames.length
+          ? prisma.workReportAttachment.findMany({
+              where: { organizationId, storedName: { in: safeFsNames } },
+              select: { storedName: true }
+            })
+          : Promise.resolve([] as Array<{ storedName: string }>)
+      ]);
+      const organizationOwnedFsNames = new Set<string>([
+        ...orgInterventionFsRefs.map((row) => row.storedName),
+        ...orgWorkReportFsRefs.map((row) => row.storedName)
+      ]);
 
       const candidateForDelete: string[] = [];
       const errorsSample: string[] = [];
@@ -3781,6 +4588,10 @@ async function startServer() {
 
       for (const fileName of safeFsNames) {
         if (!isStoredAttachmentNameSafe(fileName)) {
+          skippedCount += 1;
+          continue;
+        }
+        if (!organizationOwnedFsNames.has(fileName)) {
           skippedCount += 1;
           continue;
         }
@@ -3807,13 +4618,13 @@ async function startServer() {
       const [interventionRefs, workReportRefs] = await Promise.all([
         candidateForDelete.length
           ? prisma.interventionAttachment.findMany({
-              where: { storedName: { in: candidateForDelete } },
+              where: { organizationId, storedName: { in: candidateForDelete } },
               select: { storedName: true }
             })
           : Promise.resolve([] as Array<{ storedName: string }>),
         candidateForDelete.length
           ? prisma.workReportAttachment.findMany({
-              where: { storedName: { in: candidateForDelete } },
+              where: { organizationId, storedName: { in: candidateForDelete } },
               select: { storedName: true }
             })
           : Promise.resolve([] as Array<{ storedName: string }>)
@@ -3965,11 +4776,14 @@ async function startServer() {
 
   app.get('/api/customers', allowDispatcher, async (req, res) => {
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const search = (req.query.q as string) || (req.query.search as string);
-      let whereCondition: any = { isActive: true };
+      let whereCondition: Prisma.CustomerWhereInput = { organizationId, isActive: true };
 
       if (search) {
         whereCondition = {
+          organizationId,
           isActive: true,
           OR: [
             { name: { contains: search, mode: 'insensitive' } },
@@ -3999,8 +4813,10 @@ async function startServer() {
 
   app.get('/api/customers/:id', allowDispatcher, async (req, res) => {
     try {
-      const customer = await prisma.customer.findUnique({
-        where: { id: req.params.id }
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
+      const customer = await prisma.customer.findFirst({
+        where: { id: req.params.id, organizationId }
       });
       if (!customer) return res.status(404).json({ error: 'Customer not found' });
       res.json(customer);
@@ -4011,15 +4827,17 @@ async function startServer() {
 
   app.get('/api/customers/:customerId/sites', allowDispatcher, async (req, res) => {
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const customerId = req.params.customerId;
-      const customer = await prisma.customer.findUnique({
-        where: { id: customerId },
+      const customer = await prisma.customer.findFirst({
+        where: { id: customerId, organizationId },
         select: { id: true }
       });
       if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
       const sites = await prisma.site.findMany({
-        where: { customerId },
+        where: { customerId, organizationId },
         orderBy: { createdAt: 'desc' }
       });
       res.json(sites);
@@ -4030,9 +4848,11 @@ async function startServer() {
 
   app.post('/api/customers/:customerId/sites', allowDispatcher, async (req, res) => {
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const customerId = req.params.customerId;
-      const customer = await prisma.customer.findUnique({
-        where: { id: customerId },
+      const customer = await prisma.customer.findFirst({
+        where: { id: customerId, organizationId },
         select: { id: true }
       });
       if (!customer) return res.status(404).json({ error: 'Customer not found' });
@@ -4057,6 +4877,7 @@ async function startServer() {
 
       const newSite = await prisma.site.create({
         data: {
+          organizationId,
           customerId,
           label: data.label ?? null,
           address: data.address,
@@ -4075,15 +4896,17 @@ async function startServer() {
 
   app.get('/api/sites/:siteId/jobs', allowDispatcher, async (req, res) => {
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const siteId = req.params.siteId;
-      const site = await prisma.site.findUnique({
-        where: { id: siteId },
+      const site = await prisma.site.findFirst({
+        where: { id: siteId, organizationId },
         select: { id: true }
       });
       if (!site) return res.status(404).json({ error: 'Site not found' });
 
       const jobs = await prisma.job.findMany({
-        where: { siteId },
+        where: { siteId, organizationId },
         orderBy: { createdAt: 'desc' }
       });
       return res.json(jobs);
@@ -4094,9 +4917,11 @@ async function startServer() {
 
   app.post('/api/sites/:siteId/jobs', allowDispatcher, async (req, res) => {
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const siteId = req.params.siteId;
-      const site = await prisma.site.findUnique({
-        where: { id: siteId },
+      const site = await prisma.site.findFirst({
+        where: { id: siteId, organizationId },
         select: { id: true }
       });
       if (!site) return res.status(404).json({ error: 'Site not found' });
@@ -4121,6 +4946,7 @@ async function startServer() {
 
       const newJob = await prisma.job.create({
         data: {
+          organizationId,
           siteId,
           code: data.code ?? null,
           title: data.title,
@@ -4141,6 +4967,8 @@ async function startServer() {
 
   app.patch('/api/jobs/:id', allowDispatcher, async (req, res) => {
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const id = req.params.id;
       const data = jobPatchSchema.parse(req.body);
 
@@ -4172,10 +5000,19 @@ async function startServer() {
         updateData.endDate = endDate === undefined ? undefined : endDate;
       }
 
-      const updated = await prisma.job.update({
-        where: { id },
+      const updatedCount = await prisma.job.updateMany({
+        where: { id, organizationId },
         data: updateData
       });
+      if (updatedCount.count !== 1) {
+        return res.status(404).json({ error: 'Job not found' });
+      }
+      const updated = await prisma.job.findFirst({
+        where: { id, organizationId }
+      });
+      if (!updated) {
+        return res.status(404).json({ error: 'Job not found' });
+      }
       return res.json(updated);
     } catch (error: any) {
       if (error instanceof z.ZodError) {
@@ -4190,15 +5027,17 @@ async function startServer() {
 
   app.get('/api/jobs/:id/interventions', allowDispatcher, async (req, res) => {
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const id = req.params.id;
-      const job = await prisma.job.findUnique({
-        where: { id },
+      const job = await prisma.job.findFirst({
+        where: { id, organizationId },
         select: { id: true }
       });
       if (!job) return res.status(404).json({ error: 'Job not found' });
 
       const interventions = await prisma.intervention.findMany({
-        where: { jobId: id },
+        where: { jobId: id, organizationId },
         orderBy: { createdAt: 'desc' }
       });
       return res.json(interventions);
@@ -4209,6 +5048,8 @@ async function startServer() {
 
   app.post('/api/customers', allowDispatcher, async (req, res) => {
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const data = customerSchema.parse(req.body);
       const normalizedData = {
         ...data,
@@ -4224,7 +5065,7 @@ async function startServer() {
       ]);
       if (phoneDuplicateOrConditions.length > 0) {
         const existingPhoneCustomer = await prisma.customer.findFirst({
-          where: { OR: phoneDuplicateOrConditions }
+          where: { organizationId, OR: phoneDuplicateOrConditions }
         });
         if (existingPhoneCustomer) {
           return res.status(409).json({ error: 'Cliente già presente', data: existingPhoneCustomer });
@@ -4238,24 +5079,33 @@ async function startServer() {
 
       if (OR_conditions.length > 0) {
         const existing = await prisma.customer.findFirst({
-          where: { OR: OR_conditions }
+          where: { organizationId, OR: OR_conditions }
         });
         if (existing) {
           if (!existing.isActive) {
-            const reactivated = await prisma.customer.update({
-              where: { id: existing.id },
+            const updatedCount = await prisma.customer.updateMany({
+              where: { id: existing.id, organizationId },
               data: {
                 ...normalizedData,
                 isActive: true
               }
             });
+            if (updatedCount.count !== 1) {
+              return res.status(404).json({ error: 'Customer not found' });
+            }
+            const reactivated = await prisma.customer.findFirst({
+              where: { id: existing.id, organizationId }
+            });
+            if (!reactivated) {
+              return res.status(404).json({ error: 'Customer not found' });
+            }
             return res.status(200).json(reactivated);
           }
           return res.status(409).json({ error: 'Cliente già presente', data: existing });
         }
       }
 
-      const newCustomer = await prisma.customer.create({ data: normalizedData });
+      const newCustomer = await prisma.customer.create({ data: { ...normalizedData, organizationId } });
       res.status(201).json(newCustomer);
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
@@ -4277,6 +5127,8 @@ async function startServer() {
 
   app.patch('/api/customers/:id', allowDispatcher, async (req, res) => {
     try {
+      const organizationId = getOrganizationIdOrReject(req, res);
+      if (!organizationId) return;
       const data = customerSchema.partial().parse(req.body);
       const normalizedData = {
         ...data,
@@ -4292,6 +5144,7 @@ async function startServer() {
       if (phoneDuplicateOrConditions.length > 0) {
         const existingCustomer = await prisma.customer.findFirst({
           where: {
+            organizationId,
             id: { not: req.params.id },
             OR: phoneDuplicateOrConditions
           }
@@ -4300,10 +5153,19 @@ async function startServer() {
           return res.status(409).json({ error: 'Cliente già presente', data: existingCustomer });
         }
       }
-      const updated = await prisma.customer.update({
-        where: { id: req.params.id },
+      const updatedCount = await prisma.customer.updateMany({
+        where: { id: req.params.id, organizationId },
         data: normalizedData
       });
+      if (updatedCount.count !== 1) {
+        return res.status(404).json({ error: 'Customer not found' });
+      }
+      const updated = await prisma.customer.findFirst({
+        where: { id: req.params.id, organizationId }
+      });
+      if (!updated) {
+        return res.status(404).json({ error: 'Customer not found' });
+      }
       res.json(updated);
     } catch (error) {
       if (error instanceof z.ZodError) {
@@ -4324,9 +5186,26 @@ async function startServer() {
 
   if (process.env.NODE_ENV === "production") {
     const distDir = path.join(__dirname, "dist");
-    app.use(express.static(distDir, { index: false }));
+    app.use(express.static(distDir, {
+      index: false,
+      setHeaders: (res, filePath) => {
+        const normalizedPath = filePath.replace(/\\/g, "/");
+        if (normalizedPath.endsWith(".html")) {
+          res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+          return;
+        }
+        const fileName = path.basename(normalizedPath);
+        const hasBuildHash = /\.[a-z0-9_-]{8,}\./i.test(fileName);
+        if (hasBuildHash) {
+          res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+          return;
+        }
+        res.setHeader("Cache-Control", "public, max-age=3600");
+      }
+    }));
     app.get("*", (req, res, next) => {
       if (req.path.startsWith("/api/")) return next();
+      res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
       res.sendFile(path.join(distDir, "index.html"), (err) => {
         if (err) next(err);
       });

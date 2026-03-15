@@ -21,6 +21,9 @@
     "seed:demo:clients": "node --import tsx scripts/import-demo-clients.ts",
     "demo:reset:interventions": "node --import tsx scripts/demo-reset-interventions.ts"
   },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
   "dependencies": {
     "@fullcalendar/core": "^6.1.20",
     "@fullcalendar/daygrid": "^6.1.20",
@@ -43,7 +46,9 @@
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
     "express-rate-limit": "^8.2.1",
+    "helmet": "^8.1.0",
     "idb": "^8.0.3",
+    "ioredis": "^5.7.0",
     "jsonwebtoken": "^9.0.2",
     "jspdf": "^4.2.0",
     "lucide-react": "^0.546.0",
@@ -56,6 +61,7 @@
     "react-hook-form": "^7.71.2",
     "react-router-dom": "^7.13.0",
     "react-signature-canvas": "^1.1.0-alpha.2",
+    "rate-limit-redis": "^4.3.0",
     "tailwind-merge": "^3.5.0",
     "uuid": "^13.0.0",
     "vite": "^6.2.0",

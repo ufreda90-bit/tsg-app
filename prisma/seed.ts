@@ -23,6 +23,15 @@ async function main() {
     prisma.technician.deleteMany()
   ]);
 
+  const defaultOrganization =
+    (await prisma.organization.findFirst({ orderBy: { id: "asc" } })) ||
+    (await prisma.organization.create({
+      data: {
+        name: "Demo Organization",
+        plan: "DEMO"
+      }
+    }));
+
   // Create Technicians
   const techniciansSeed = [
     { name: 'Mariano', color: '#ef4444', skills: 'generale', phone: '3331000001' },
@@ -39,7 +48,12 @@ async function main() {
 
   const createdTechs = [];
   for (const t of techniciansSeed) {
-    createdTechs.push(await prisma.technician.create({ data: t }));
+    createdTechs.push(await prisma.technician.create({
+      data: {
+        ...t,
+        organizationId: defaultOrganization.id
+      }
+    }));
   }
 
   console.log('Created technicians:', createdTechs.map(t => t.name));
@@ -50,6 +64,7 @@ async function main() {
 
   await prisma.user.create({
     data: {
+      organizationId: defaultOrganization.id,
       name: 'Admin',
       username: 'admin',
       email: 'admin@demo.local',
@@ -60,6 +75,7 @@ async function main() {
 
   await prisma.user.create({
     data: {
+      organizationId: defaultOrganization.id,
       name: 'Dispatcher',
       username: 'dispatcher',
       email: 'dispatcher@demo.local',
@@ -71,12 +87,20 @@ async function main() {
   if (createdTechs[0]) {
     await prisma.user.create({
       data: {
+        organization: { connect: { id: defaultOrganization.id } },
         name: 'Tecnico 1',
         username: 'tech1',
         email: 'tech1@demo.local',
         passwordHash: techHash,
         role: 'TECHNICIAN',
-        technician: { connect: { id: createdTechs[0].id } }
+        technician: {
+          connect: {
+            organizationId_id: {
+              organizationId: defaultOrganization.id,
+              id: createdTechs[0].id
+            }
+          }
+        }
       }
     });
   }
@@ -237,6 +261,7 @@ async function main() {
     return prisma.intervention.create({
       data: {
         ...data,
+        organizationId: defaultOrganization.id,
         status,
         workReport
       }

@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, ReactNode, useEffect } from 'react';
-import { AUTH_CHANGED_AT_KEY, AuthUser, clearAuthStorage, getAccessToken, getRefreshToken, getStoredUser, setAccessToken, setRefreshToken, setStoredUser } from '../lib/authStorage';
+import { AUTH_CHANGED_AT_KEY, AuthUser, clearAuthStorage, getAccessToken, getStoredUser, setAccessToken, setStoredUser } from '../lib/authStorage';
 
 export type UserRole = 'ADMIN' | 'DISPATCHER' | 'TECHNICIAN' | null;
 
@@ -7,7 +7,7 @@ interface AuthContextType {
   user: AuthUser | null;
   role: UserRole;
   technicianId: number | null;
-  setSession: (user: AuthUser, accessToken: string, refreshToken: string) => void;
+  setSession: (user: AuthUser, accessToken: string) => void;
   logout: () => Promise<void>;
 }
 
@@ -53,23 +53,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  const setSession = (nextUser: AuthUser, accessToken: string, refreshToken: string) => {
+  const setSession = (nextUser: AuthUser, accessToken: string) => {
     setAccessToken(accessToken);
-    setRefreshToken(refreshToken);
     setStoredUser(nextUser);
     setUser(nextUser);
   };
 
   const logout = async () => {
     try {
-      const refreshToken = getRefreshToken();
-      if (refreshToken) {
-        await fetch('/api/auth/logout', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ refreshToken })
-        });
-      }
+      await fetch('/api/auth/logout', {
+        method: 'POST'
+      });
     } catch (e) {
       // ignore logout errors
     } finally {

@@ -125,6 +125,16 @@ async function main() {
     }
   }
 
+  const defaultOrganization =
+    (await prisma.organization.findFirst({ orderBy: { id: "asc" } })) ||
+    (await prisma.organization.create({
+      data: {
+        name: "Demo Organization",
+        plan: "DEMO"
+      }
+    }));
+  const organizationId = defaultOrganization.id;
+
   let created = 0;
   let updated = 0;
   let failed = 0;
@@ -154,10 +164,11 @@ async function main() {
       const preferredTimeSlot = parsePreferredTimeSlot(row.preferredTimeSlot);
 
       const payload = {
+        organizationId,
         name,
         companyName,
         email,
-        phone,
+        phone1: phone,
         taxCode,
         addressLine,
         city,
@@ -168,12 +179,12 @@ async function main() {
       };
 
       const existing = await prisma.customer.findUnique({
-        where: { taxCode },
+        where: { organizationId_taxCode: { organizationId, taxCode } },
         select: { id: true }
       });
 
       await prisma.customer.upsert({
-        where: { taxCode },
+        where: { organizationId_taxCode: { organizationId, taxCode } },
         update: payload,
         create: payload
       });

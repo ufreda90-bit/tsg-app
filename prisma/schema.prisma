@@ -49,10 +49,31 @@ enum AttachmentKind {
   FILE
 }
 
+model Organization {
+  id          Int                     @id @default(autoincrement())
+  name        String
+  plan        String?
+  createdAt   DateTime                @default(now())
+
+  users                    User[]
+  technicians              Technician[]
+  interventions            Intervention[]
+  customers                Customer[]
+  sites                    Site[]
+  jobs                     Job[]
+  workReports              WorkReport[]
+  media                    Media[]
+  pushSubscriptions        PushSubscription[]
+  interventionAttachments  InterventionAttachment[]
+  workReportAttachments    WorkReportAttachment[]
+}
+
 model Technician {
   id            Int            @id @default(autoincrement())
+  organizationId Int
+  organization  Organization   @relation(fields: [organizationId], references: [id])
   name          String
-  email         String?        @unique
+  email         String?
   phone         String?
   color         String         @default("#3b82f6") // Blue default
   skills        String         // Comma separated for simplicity
@@ -60,25 +81,58 @@ model Technician {
   interventions         Intervention[] @relation("PrimaryTech")
   secondaryInterventions Intervention[] @relation("SecondaryTech")
   user          User?          @relation("TechnicianUser")
+  pushSubscriptions PushSubscription[]
+
+  @@unique([organizationId, id])
+  @@unique([organizationId, email])
+  @@index([organizationId])
 }
 
 model User {
   id            Int       @id @default(autoincrement())
+  organizationId Int
+  organization  Organization @relation(fields: [organizationId], references: [id])
   name          String
-  username      String    @unique
-  email         String?   @unique
+  username      String
+  email         String?
   phone         String?   @unique
   passwordHash  String
   role          Role
   technicianId  Int?      @unique
-  technician    Technician? @relation("TechnicianUser", fields: [technicianId], references: [id])
+  technician    Technician? @relation("TechnicianUser", fields: [organizationId, technicianId], references: [organizationId, id], onDelete: Restrict)
   isActive      Boolean   @default(true)
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
   refreshTokens RefreshToken[]
+  auditLogs     AuditLog[]
 
+  @@unique([organizationId, username])
+  @@unique([organizationId, email])
+  @@unique([organizationId, technicianId])
   @@index([role])
+  @@index([organizationId])
+}
+
+model AuditLog {
+  id             Int      @id @default(autoincrement())
+  organizationId Int?
+  userId         Int?
+  action         String
+  entity         String?
+  entityId       String?
+  status         String?
+  metadata       Json?
+  ip             String?
+  requestId      String?
+  createdAt      DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId])
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
 }
 
 model RefreshToken {
@@ -96,6 +150,8 @@ model RefreshToken {
 
 model Intervention {
   id           Int         @id @default(autoincrement())
+  organizationId Int
+  organization Organization @relation(fields: [organizationId], references: [id])
   version      Int         @default(0)
   title        String
   description  String?
@@ -107,17 +163,17 @@ model Intervention {
   
   // Primary technician used for calendar scheduling and conflict checks
   technicianId Int?
-  technician   Technician? @relation("PrimaryTech", fields: [technicianId], references: [id])
+  technician   Technician? @relation("PrimaryTech", fields: [organizationId, technicianId], references: [organizationId, id], onDelete: Restrict)
 
   // Optional second technician (the team often works in pairs)
   secondaryTechnicianId Int?
-  secondaryTechnician   Technician? @relation("SecondaryTech", fields: [secondaryTechnicianId], references: [id])
+  secondaryTechnician   Technician? @relation("SecondaryTech", fields: [organizationId, secondaryTechnicianId], references: [organizationId, id], onDelete: Restrict)
   
   customerId   String?
-  customer     Customer?   @relation(fields: [customerId], references: [id])
+  customer     Customer?   @relation(fields: [organizationId, customerId], references: [organizationId, id], onDelete: Restrict)
 
   jobId        String?
-  job          Job?        @relation(fields: [jobId], references: [id], onDelete: SetNull)
+  job          Job?        @relation(fields: [organizationId, jobId], references: [organizationId, id], onDelete: Restrict)
   
   customerNameSnapshot   String?
   customerEmailSnapshot  String?
@@ -131,16 +187,20 @@ model Intervention {
   workReport   WorkReport?
   attachments  InterventionAttachment[]
 
+  @@unique([organizationId, id])
   @@index([status])
   @@index([technicianId])
   @@index([secondaryTechnicianId])
   @@index([startAt])
   @@index([endAt])
   @@index([jobId])
+  @@index([organizationId])
 }
 
 model Customer {
   id           String        @id @default(uuid())
+  organizationId Int
+  organization Organization  @relation(fields: [organizationId], references: [id])
   companyName  String?
   customerType CustomerType  @default(PRIVATO)
   preferredTimeSlot PreferredTimeSlot @default(INDIFFERENTE)
@@ -148,7 +208,7 @@ model Customer {
   email        String?
   phone1       String?
   phone2       String?
-  taxCode      String?       @unique
+  taxCode      String?
   vatNumber    String?
   addressLine  String?
   physicalAddress String?
@@ -163,12 +223,18 @@ model Customer {
   
   interventions Intervention[]
   sites         Site[]
+
+  @@unique([organizationId, id])
+  @@unique([organizationId, taxCode])
+  @@index([organizationId])
 }
 
 model Site {
   id         String    @id @default(uuid())
+  organizationId Int
+  organization Organization @relation(fields: [organizationId], references: [id])
   customerId String
-  customer   Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  customer   Customer  @relation(fields: [organizationId, customerId], references: [organizationId, id], onDelete: Cascade)
   label      String?
   address    String
   startDate  DateTime?
@@ -177,11 +243,15 @@ model Site {
   updatedAt  DateTime  @updatedAt
   jobs       Job[]
 
+  @@unique([organizationId, id])
   @@index([customerId])
+  @@index([organizationId])
 }
 
 model Job {
   id           String         @id @default(uuid())
+  organizationId Int
+  organization Organization   @relation(fields: [organizationId], references: [id])
   siteId       String
   code         String?
   title        String
@@ -192,17 +262,21 @@ model Job {
   createdAt    DateTime       @default(now())
   updatedAt    DateTime       @updatedAt
 
-  site          Site           @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  site          Site           @relation(fields: [organizationId, siteId], references: [organizationId, id], onDelete: Cascade)
   interventions Intervention[]
 
+  @@unique([organizationId, id])
   @@index([siteId])
+  @@index([organizationId])
 }
 
 model WorkReport {
   id                       String       @id @default(uuid())
-  reportNumber             Int          @unique
-  interventionId           Int          @unique
-  intervention             Intervention @relation(fields: [interventionId], references: [id], onDelete: Cascade)
+  organizationId           Int
+  organization             Organization @relation(fields: [organizationId], references: [id])
+  reportNumber             Int
+  interventionId           Int
+  intervention             Intervention @relation(fields: [organizationId, interventionId], references: [organizationId, id], onDelete: Cascade)
   
   actualStartAt            DateTime?
   actualEndAt              DateTime?
@@ -232,32 +306,51 @@ model WorkReport {
   version                  Int          @default(0)
   updatedAt                DateTime     @updatedAt
   attachments              WorkReportAttachment[]
+
+  @@unique([organizationId, id])
+  @@unique([organizationId, reportNumber])
+  @@unique([organizationId, interventionId])
+  @@index([organizationId])
 }
 
 model Media {
   id             Int          @id @default(autoincrement())
+  organizationId Int
+  organization   Organization @relation(fields: [organizationId], references: [id])
   url            String       // Base64 string or file path
   type           String       // 'image' | 'video'
   interventionId Int
-  intervention   Intervention @relation(fields: [interventionId], references: [id], onDelete: Cascade)
+  intervention   Intervention @relation(fields: [organizationId, interventionId], references: [organizationId, id], onDelete: Cascade)
   createdAt      DateTime     @default(now())
+
+  @@index([organizationId, interventionId])
+  @@index([organizationId])
 }
 
 model PushSubscription {
   id            Int         @id @default(autoincrement())
-  endpoint      String      @unique
+  organizationId Int
+  organization  Organization @relation(fields: [organizationId], references: [id])
+  endpoint      String
   p256dh        String
   auth          String
   technicianId  Int?
+  technician    Technician? @relation(fields: [organizationId, technicianId], references: [organizationId, id], onDelete: Restrict)
   role          String      @default("TECHNICIAN") // 'ADMIN' or 'TECHNICIAN'
   
   createdAt     DateTime    @default(now())
+
+  @@unique([organizationId, endpoint])
+  @@index([organizationId, technicianId])
+  @@index([organizationId])
 }
 
 model InterventionAttachment {
   id              String         @id @default(uuid())
+  organizationId  Int
+  organization    Organization   @relation(fields: [organizationId], references: [id])
   interventionId  Int
-  intervention    Intervention   @relation(fields: [interventionId], references: [id], onDelete: Cascade)
+  intervention    Intervention   @relation(fields: [organizationId, interventionId], references: [organizationId, id], onDelete: Cascade)
   kind            AttachmentKind
   mimeType        String
   originalName    String
@@ -266,13 +359,17 @@ model InterventionAttachment {
   createdByUserId Int?
   createdAt       DateTime       @default(now())
 
+  @@index([organizationId, interventionId])
   @@index([interventionId])
+  @@index([organizationId])
 }
 
 model WorkReportAttachment {
   id           String         @id @default(uuid())
+  organizationId Int
+  organization Organization   @relation(fields: [organizationId], references: [id])
   workReportId String
-  workReport   WorkReport     @relation(fields: [workReportId], references: [id], onDelete: Cascade)
+  workReport   WorkReport     @relation(fields: [organizationId, workReportId], references: [organizationId, id], onDelete: Cascade)
   kind         AttachmentKind
   mimeType     String
   originalName String
@@ -280,5 +377,7 @@ model WorkReportAttachment {
   size         Int
   createdAt    DateTime       @default(now())
 
+  @@index([organizationId, workReportId])
   @@index([workReportId])
+  @@index([organizationId])
 }

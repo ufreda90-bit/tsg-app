@@ -2425,6 +2425,11 @@ export default function DispatcherPage() {
             slotMaxTime={formatHourToSlot(plannerPrefs.dayEndHour)}
             slotDuration="00:15:00"
             snapDuration="00:15:00"
+            slotLabelFormat={{
+              hour: '2-digit',
+              minute: '2-digit',
+              hour12: false
+            }}
             headerToolbar={false}
             allDaySlot={false}
             height="100%"

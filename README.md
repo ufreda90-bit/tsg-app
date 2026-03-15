@@ -100,12 +100,31 @@ Notes:
 - Set `ALLOW_DEMO_TOKEN=false`.
 - Use a strong `JWT_SECRET`.
 
+Frontend build notes:
+- Vite outputs hashed static assets and a build manifest (`dist/.vite/manifest.json`) for cache-friendly deploys.
+- Bundle chunking is configured to split major vendor groups (React core, FullCalendar, jsPDF, Workbox) for better long-term caching.
+- Server secrets must never be injected into the client bundle; expose only safe `VITE_*` variables to frontend code.
+
 ## Deployment Notes
 
 - Keep runtime env values outside git (`.env`, secrets manager, CI/CD variables).
 - Run `npm run db:deploy` before (or during) startup.
 - Ensure persistence for PostgreSQL data and `uploads/` directory (attachments, media).
 - Existing deployment guidance is in `DEPLOYMENT.md`; validate it against your actual infrastructure before go-live.
+
+## Login Brute-Force Protection (optional env)
+
+`/api/auth/login` uses an in-memory dual bucket guard (IP + normalized identifier).
+
+```bash
+LOGIN_BRUTE_FORCE_WINDOW_MS=900000
+LOGIN_BRUTE_FORCE_MAX_FAILED=8
+LOGIN_BRUTE_FORCE_LOCK_MS=900000
+```
+
+- `LOGIN_BRUTE_FORCE_WINDOW_MS`: rolling failure window in milliseconds.
+- `LOGIN_BRUTE_FORCE_MAX_FAILED`: max failed attempts inside the window before temporary lock.
+- `LOGIN_BRUTE_FORCE_LOCK_MS`: temporary lock duration in milliseconds.
 
 ## Backup Considerations
 

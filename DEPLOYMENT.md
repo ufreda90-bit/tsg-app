@@ -77,6 +77,27 @@ Important:
 - `server.ts` is configured with `app.set("trust proxy", 1)` for production proxy setups.
 - Rate limiting will correctly use proxy headers when the reverse proxy forwards client IPs.
 
+## Nginx hardened reverse proxy example
+
+A versioned example config is included at:
+
+- `deploy/nginx/app.conf.example`
+
+Typical install flow on VPS:
+
+```bash
+sudo cp deploy/nginx/app.conf.example /etc/nginx/sites-available/dispatcher_operativo.conf
+sudo ln -s /etc/nginx/sites-available/dispatcher_operativo.conf /etc/nginx/sites-enabled/dispatcher_operativo.conf
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+Notes:
+- The example on port 80 is only a baseline reverse proxy to `http://127.0.0.1:3000`.
+- In production, prefer HTTP -> HTTPS redirect and configure HSTS only on the TLS server block (`listen 443 ssl`).
+- TLS directives/certbot setup are intentionally not included in this file.
+- Keep HSTS enabled only after HTTPS is stable on your production domain/subdomains.
+
 ## Update Workflow (safe + repeatable)
 
 ```bash

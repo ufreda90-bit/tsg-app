@@ -5,6 +5,7 @@ import { useNavigate } from 'react-router-dom';
 export default function LoginPage() {
   const { setSession } = useAuth();
   const navigate = useNavigate();
+  const [organizationId, setOrganizationId] = useState('');
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -13,13 +14,20 @@ export default function LoginPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    setLoading(true);
 
     try {
+      const parsedOrganizationId = Number(organizationId);
+      if (!Number.isInteger(parsedOrganizationId) || parsedOrganizationId <= 0) {
+        setError('Inserisci un ID organizzazione valido');
+        return;
+      }
+      setLoading(true);
+
       const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          organizationId: parsedOrganizationId,
           identifier: identifier.trim(),
           password
         })
@@ -31,7 +39,7 @@ export default function LoginPage() {
         return;
       }
 
-      setSession(data.user, data.accessToken, data.refreshToken);
+      setSession(data.user, data.accessToken);
       if (typeof window !== 'undefined') {
         sessionStorage.removeItem('adminProfile');
       }
@@ -64,6 +72,21 @@ export default function LoginPage() {
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
+          <div>
+            <label className="block text-sm font-semibold text-slate-600 mb-1">ID Organizzazione</label>
+            <input
+              type="number"
+              min={1}
+              step={1}
+              value={organizationId}
+              onChange={e => setOrganizationId(e.target.value)}
+              className="glass-input w-full px-4 py-3 rounded-xl border border-white/70 outline-none focus:ring-2 focus:ring-brand-400/40"
+              placeholder="1"
+              autoComplete="organization"
+              required
+            />
+          </div>
+
           <div>
             <label className="block text-sm font-semibold text-slate-600 mb-1">Email, Username o Telefono</label>
             <input

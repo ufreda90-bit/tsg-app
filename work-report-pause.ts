@@ -16,7 +16,7 @@ export type PauseWorkReportRecord = {
 
 export type PauseWorkReportTx = {
   workReport: {
-    findUnique(args: { where: { interventionId: number } }): Promise<PauseWorkReportRecord | null>;
+    findFirst(args: { where: { interventionId: number; organizationId: number } }): Promise<PauseWorkReportRecord | null>;
     updateMany(args: {
       where: Record<string, unknown>;
       data: Record<string, unknown>;
@@ -73,11 +73,12 @@ function buildPauseStartData(current: PauseWorkReportRecord, now: Date) {
 export async function pauseStartWorkReportInTransaction(params: {
   tx: PauseWorkReportTx;
   interventionId: number;
+  organizationId: number;
   now: Date;
 }) {
-  const { tx, interventionId, now } = params;
+  const { tx, interventionId, organizationId, now } = params;
 
-  const current = await tx.workReport.findUnique({ where: { interventionId } });
+  const current = await tx.workReport.findFirst({ where: { interventionId, organizationId } });
   ensurePauseStartPreconditions(current);
 
   if (isNoopPauseStartState(current)) {
@@ -87,6 +88,7 @@ export async function pauseStartWorkReportInTransaction(params: {
   const result = await tx.workReport.updateMany({
     where: {
       interventionId,
+      organizationId,
       version: current.version,
       actualEndAt: null,
       pauseStartAt: null
@@ -98,14 +100,14 @@ export async function pauseStartWorkReportInTransaction(params: {
   });
 
   if (result.count === 1) {
-    const updated = await tx.workReport.findUnique({ where: { interventionId } });
+    const updated = await tx.workReport.findFirst({ where: { interventionId, organizationId } });
     if (!updated) {
       throw { status: 404, message: "Work report not found" };
     }
     return updated;
   }
 
-  const latest = await tx.workReport.findUnique({ where: { interventionId } });
+  const latest = await tx.workReport.findFirst({ where: { interventionId, organizationId } });
   ensurePauseStartPreconditions(latest);
   if (isNoopPauseStartState(latest)) {
     return latest;
@@ -116,11 +118,12 @@ export async function pauseStartWorkReportInTransaction(params: {
 export async function pauseStopWorkReportInTransaction(params: {
   tx: PauseWorkReportTx;
   interventionId: number;
+  organizationId: number;
   now: Date;
 }) {
-  const { tx, interventionId, now } = params;
+  const { tx, interventionId, organizationId, now } = params;
 
-  const current = await tx.workReport.findUnique({ where: { interventionId } });
+  const current = await tx.workReport.findFirst({ where: { interventionId, organizationId } });
   ensurePauseStopPreconditions(current);
 
   if (isNoopPauseStopState(current)) {
@@ -133,6 +136,7 @@ export async function pauseStopWorkReportInTransaction(params: {
   const result = await tx.workReport.updateMany({
     where: {
       interventionId,
+      organizationId,
       version: current.version,
       actualEndAt: null,
       pauseStartAt: current.pauseStartAt
@@ -145,14 +149,14 @@ export async function pauseStopWorkReportInTransaction(params: {
   });
 
   if (result.count === 1) {
-    const updated = await tx.workReport.findUnique({ where: { interventionId } });
+    const updated = await tx.workReport.findFirst({ where: { interventionId, organizationId } });
     if (!updated) {
       throw { status: 404, message: "Work report not found" };
     }
     return updated;
   }
 
-  const latest = await tx.workReport.findUnique({ where: { interventionId } });
+  const latest = await tx.workReport.findFirst({ where: { interventionId, organizationId } });
   ensurePauseStopPreconditions(latest);
   if (isNoopPauseStopState(latest)) {
     return latest;

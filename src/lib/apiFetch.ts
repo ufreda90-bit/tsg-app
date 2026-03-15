@@ -1,4 +1,4 @@
-import { clearAuthStorage, getAccessToken, getRefreshToken, setAccessToken, setRefreshToken } from './authStorage';
+import { clearAuthStorage, getAccessToken, setAccessToken } from './authStorage';
 import { toast } from '../components/Toast';
 
 let warnedMissingToken = false;
@@ -13,22 +13,18 @@ function getPathname(input: RequestInfo | URL) {
 }
 
 async function refreshAccessToken() {
-  const refreshToken = getRefreshToken();
-  if (!refreshToken) return null;
-
   if (!refreshPromise) {
     refreshPromise = (async () => {
       try {
         const res = await fetch('/api/auth/refresh', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ refreshToken })
+          body: JSON.stringify({})
         });
         if (!res.ok) return null;
         const data = await res.json().catch(() => null);
         if (!data?.accessToken) return null;
         setAccessToken(data.accessToken);
-        if (data.refreshToken) setRefreshToken(data.refreshToken);
         return data.accessToken as string;
       } catch {
         return null;

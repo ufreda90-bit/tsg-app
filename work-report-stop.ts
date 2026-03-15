@@ -30,6 +30,7 @@ export type StopWorkReportRecord = {
 
 export type StopInterventionRecord = {
   id: number;
+  organizationId: number;
   version: number;
   status: InterventionStatus;
 };
@@ -43,7 +44,7 @@ export type StopWorkReportTx = {
     }): Promise<unknown>;
   };
   workReport: {
-    findUnique(args: { where: { interventionId: number } }): Promise<StopWorkReportRecord | null>;
+    findFirst(args: { where: { interventionId: number; organizationId: number } }): Promise<StopWorkReportRecord | null>;
     updateMany(args: {
       where: Record<string, unknown>;
       data: Record<string, unknown>;
@@ -83,17 +84,18 @@ export function computeStoppedWorkReportMinutes(params: {
 export async function stopWorkReportInTransaction(params: {
   tx: StopWorkReportTx;
   interventionId: number;
+  organizationId: number;
   now: Date;
   notes?: unknown;
 }) {
-  const { tx, interventionId, now, notes } = params;
+  const { tx, interventionId, organizationId, now, notes } = params;
 
   const intervention = await tx.intervention.findUnique({ where: { id: interventionId } });
   if (!intervention) {
     throw { status: 404, message: "Intervento non trovato" };
   }
 
-  const current = await tx.workReport.findUnique({ where: { interventionId } });
+  const current = await tx.workReport.findFirst({ where: { interventionId, organizationId } });
   if (!current) {
     throw { status: 404, message: "Work report not found" };
   }
@@ -133,6 +135,7 @@ export async function stopWorkReportInTransaction(params: {
   const updatedCount = await tx.workReport.updateMany({
     where: {
       interventionId,
+      organizationId,
       version: current.version,
       actualEndAt: null
     },
@@ -142,7 +145,7 @@ export async function stopWorkReportInTransaction(params: {
     }
   });
   if (updatedCount.count !== 1) {
-    const latest = await tx.workReport.findUnique({ where: { interventionId } });
+    const latest = await tx.workReport.findFirst({ where: { interventionId, organizationId } });
     if (!latest) {
       throw { status: 404, message: "Work report not found" };
     }
@@ -151,7 +154,7 @@ export async function stopWorkReportInTransaction(params: {
     }
     throw { status: 409, message: TIMING_CONFLICT_MESSAGE };
   }
-  const updated = await tx.workReport.findUnique({ where: { interventionId } });
+  const updated = await tx.workReport.findFirst({ where: { interventionId, organizationId } });
   if (!updated) {
     throw { status: 404, message: "Work report not found" };
   }
@@ -161,6 +164,7 @@ export async function stopWorkReportInTransaction(params: {
     const completion = await getInterventionCompletionEligibility({
       tx,
       interventionId,
+      organizationId,
       workReportId: updated.id,
       workPerformed: updated.workPerformed
     });

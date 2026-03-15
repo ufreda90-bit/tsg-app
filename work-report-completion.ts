@@ -8,13 +8,13 @@ type CompletionWorkReportRow = {
 
 export type WorkReportCompletionTx = {
   workReport: {
-    findUnique(args: {
-      where: { interventionId: number };
+    findFirst(args: {
+      where: { interventionId: number; organizationId: number };
       select: { id: true; workPerformed: true };
     }): Promise<CompletionWorkReportRow | null>;
   };
   workReportAttachment: {
-    count(args: { where: { workReportId: string } }): Promise<number>;
+    count(args: { where: { workReportId: string; organizationId: number } }): Promise<number>;
   };
 }
 
@@ -25,17 +25,18 @@ export function hasMeaningfulWorkPerformed(workPerformed: string | null | undefi
 export async function getInterventionCompletionEligibility(params: {
   tx: WorkReportCompletionTx;
   interventionId: number;
+  organizationId: number;
   workReportId?: string | null;
   workPerformed?: string | null;
 }) {
-  const { tx, interventionId } = params;
+  const { tx, interventionId, organizationId } = params;
 
   let workReportId = params.workReportId ?? null;
   let workPerformed = params.workPerformed;
 
   if (!workReportId || workPerformed === undefined) {
-    const report = await tx.workReport.findUnique({
-      where: { interventionId },
+    const report = await tx.workReport.findFirst({
+      where: { interventionId, organizationId },
       select: { id: true, workPerformed: true }
     });
 
@@ -55,7 +56,7 @@ export async function getInterventionCompletionEligibility(params: {
 
   const hasWorkPerformed = hasMeaningfulWorkPerformed(workPerformed);
   const workReportAttachmentCount = workReportId
-    ? await tx.workReportAttachment.count({ where: { workReportId } })
+    ? await tx.workReportAttachment.count({ where: { workReportId, organizationId } })
     : 0;
 
   return {
