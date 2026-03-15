@@ -9,7 +9,7 @@ export type WorkReportContentUpdateRecord = {
 
 export type WorkReportContentUpdateTx = {
   workReport: {
-    findUnique(args: { where: { interventionId: number } }): Promise<WorkReportContentUpdateRecord | null>;
+    findFirst(args: { where: { interventionId: number } }): Promise<WorkReportContentUpdateRecord | null>;
     updateMany(args: {
       where: { interventionId: number; version: number };
       data: Record<string, unknown> & { version: { increment: number } };
@@ -39,7 +39,7 @@ export async function updateWorkReportContentWithOptimisticLock(params: {
     throw { status: 400, message: "version is required" };
   }
 
-  const existing = await (tx as any).workReport.findUnique({ where: { interventionId } });
+  const existing = await (tx as any).workReport.findFirst({ where: { interventionId } });
   if (!existing) {
     throw { status: 404, message: "Work report not found" };
   }
@@ -60,14 +60,14 @@ export async function updateWorkReportContentWithOptimisticLock(params: {
   });
 
   if (result.count === 0) {
-    const latest = await (tx as any).workReport.findUnique({ where: { interventionId } });
+    const latest = await (tx as any).workReport.findFirst({ where: { interventionId } });
     if (!latest) {
       throw { status: 404, message: "Work report not found" };
     }
     throw { status: 409, message: "Work report was updated by another client. Refresh and retry." };
   }
 
-  const updated = await (tx as any).workReport.findUnique({ where: { interventionId } });
+  const updated = await (tx as any).workReport.findFirst({ where: { interventionId } });
   if (!updated) {
     throw { status: 404, message: "Work report not found" };
   }
